@@ -183,9 +183,9 @@ func main() {
 		CheckinMinutes: nil, KeepaliveHours: nil})
 	// QoderCN：签到双路径已实现（campaigns 主路径 + daily-check-in 兑底），
 	// 沿用全局签到时段；token keepalive 与 qoder 相同。
-	qcnSch := scheduler.New(scheduler.Config{Pool: qcnPool, Upstream: qcnUp, Name: "qodercn", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours})
+	qcnSch := scheduler.New(scheduler.Config{Pool: qcnPool, Upstream: qcnUp, Name: "qodercn", CheckinMinutes: []int{615}, KeepaliveHours: cfg.Schedule.KeepaliveHours})
 	// QoderCOM：仅 campaigns 活动路径（无 daily-check-in）；其余同 QoderCN。
-	qcmSch := scheduler.New(scheduler.Config{Pool: qcmPool, Upstream: qcmUp, Name: "qodercom", CheckinMinutes: checkinMinutes, KeepaliveHours: cfg.Schedule.KeepaliveHours})
+	qcmSch := scheduler.New(scheduler.Config{Pool: qcmPool, Upstream: qcmUp, Name: "qodercom", CheckinMinutes: []int{615}, KeepaliveHours: cfg.Schedule.KeepaliveHours})
 
 	runtimes := map[provider.Kind]*server.Runtime{
 		provider.WorkBuddy: {Kind: provider.WorkBuddy, Pool: wbPool, Upstream: wbUp, StaticModels: server.WorkBuddyStaticModels()},
@@ -289,6 +289,8 @@ func main() {
 	go qdSch.Run(sctx)
 	go wbaSch.Run(sctx)
 	go qwSch.Run(sctx)
+	go qcnSch.Run(sctx)
+	go qcmSch.Run(sctx)
 
 	// 积分自动刷新覆盖全部渠道：
 	// - workbuddyai / qoder 无签到活动，不自动刷就会一直显示旧值或 0；
