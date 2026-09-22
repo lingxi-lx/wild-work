@@ -869,3 +869,41 @@ JWT 仅作快照优化。
 - 失败请求（424）也扣费（179K 探测失败仍扣 ~5）——上游已消耗推理资源。
 - 扣费数值与 tokens 非线性对应，存在按次结算/折扣波动，精确计费模型未逆向。
 - 本轮探测总消耗 ≈ 40 积分。
+
+### 10. 渠道故障诊断（2026-09-21）：503 Model catalog unavailable
+
+**现象**：千问办公渠道推理全部返回 `HTTP 200 + envelope 503 "Model catalog unavailable"`；
+官方客户端同账号正常。模型列表、余额、refresh 均正常。
+
+**排除矩阵**（8 轮实验，客户端可控维度全部穷尽）：
+
+| 维度 | 实验 | 结果 |
+|---|---|---|
+| 签名 | 极简头/完整头 | 通过（非 403） |
+| token | OAuth 原始 / refresh 后 | 均 503 |
+| 机器指纹 | 加 Cosy-MachineId/Token | 503 |
+| 档位 | flash / pro / qwen3.8-max-preview | 全 503 |
+| body 结构 | OpenAI 透传 / Buddy2api 原生 / qoder 风格 | 全 503 |
+| 版本头 | cosyVersion 1.0.0 / 0.1.43 / 1.1.18 | 全 503 |
+| UA | node / qoderwork/0.1.8 / 官方 Electron | 全 503 |
+| Buddy2api 22 头完整克隆（含 X-QwenWork-* 族） | E7/E8/E9 | 全 503 |
+| info 字段 | 加 client_type=desktop | 503 |
+| query | FetchKeys/AgentId 变体 | 503（裸路径 400 agent_id required 说明路由正常） |
+| info 变体 | uid/aid/name/email/security_oauth_token 精确复刻 | 503 |
+
+**上游佐证**：Buddy2api v2.1.14（2026-09-21，最新）**qwenwork 推理链路自 v2.1.9 以来零改动**；
+其仓库 Issue **#82「[Bug]: QwenWork上游返回异常」**（2026-09-21）报告**完全相同的
+`Model catalog unavailable` 错误**，作者暂无回复、无修复。
+
+**结论**：上游网关在签名校验之后、模型路由之前新增了服务端策略（模型目录查询失败/
+非官方客户端识别/账号级推理闸门），错误统一收敛为 503 Model catalog unavailable。
+**客户端侧（wild-work/Buddy2api）当前无可修之处**——请求构造与官方可见行为已无差异。
+
+**待观察**：
+1. Issue #82 的后续回复（作者或其它用户可能发现新差异）；
+2. 用 mitmproxy 抓官方客户端推理报文与我们的逐字节 diff（备忘 §7 方法）——若客户端
+   请求形态也没变化，则纯粹是服务端针对 OAuth device token 的推理闸门，只能等上游放开
+   或寻找新的鉴权链（如复用客户端内 qoderclicn 的本地签名通道）；
+3. 账号维度：Free 套餐 + OAuth token 组合可能被降级，付费账号是否受影响待观察。
+
+**渠道状态**：保持接入（代码无需回滚），账号面板/余额/费率仍正常；推理恢复时间取决于上游。
