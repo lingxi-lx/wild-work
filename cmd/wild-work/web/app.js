@@ -214,8 +214,8 @@ function renderTopbar() {
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
@@ -627,6 +627,8 @@ function closeApiConfig() {
 const CHANNEL_PRESETS = {
   workbuddy:   { label: "Claude Code → workbuddy",  items: ["claude-* = workbuddy/glm-5.2", "claude-sonnet-* = workbuddy/kimi-k2.7"] },
   traework:    { label: "Codex → traework",          items: ["gpt-5* = traework/glm-5.2", "codex-* = traework/DeepSeek-V4-Pro"] },
+  // TraeCode 与 TraeWork 共用账号，预设沿用 Codex 语义（面向代码场景的新版模型）。
+  traecode:    { label: "Codex → traecode",          items: ["gpt-5* = traecode/deepseek-v4.1-flash", "codex-* = traecode/glm-5.3-flash"] },
   workbuddyai: { label: "Claude Code → workbuddyai", items: ["claude-* = workbuddyai/deepseek-v4.1-flash"] },
   qodercn:     { label: "→ qodercn",                 items: ["gpt-* = qodercn/glm-5.3"] },
   qodercom:    { label: "→ qodercom",                items: ["gpt-* = qodercom/glm-5.3"] },
@@ -637,6 +639,9 @@ const CHANNEL_PRESETS = {
 // 仅列出「已接入（有账号）」的渠道——未绑定的渠道点了也会因无账号而失败，不给误导性入口。
 function renderMapPresets(channels) {
   const bound = new Set((state.accounts || []).map(a => a.group));
+  // TraeCode 与 TraeWork 共用账号，账号列表里只会出现 traework；
+  // 但 TraeCode 是可独立路由的渠道，其预设也应可见。
+  if (bound.has("traework")) bound.add("traecode");
   const box = $("mapPresets");
   box.innerHTML = channels.filter(c => CHANNEL_PRESETS[c] && bound.has(c)).map(c => {
     const p = CHANNEL_PRESETS[c];

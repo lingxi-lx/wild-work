@@ -22,6 +22,7 @@ const (
 	QoderCN     Kind = "qodercn"    // QoderCN（qoder.com.cn，移植自 qoder2api，独立渠道）
 	QoderCOM    Kind = "qodercom"   // QoderCOM 国际版（qoder.com / qoder.sh，移植自 qodercn）
 	QwenWork    Kind = "qwenwork"   // 千问办公（gateway.qwenwork.cn + qwenwork.cn）
+	TraeCode    Kind = "traecode"   // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
 )
 
 func (k Kind) String() string { return string(k) }
