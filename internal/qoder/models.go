@@ -16,15 +16,95 @@ import (
 	"wild-work/internal/provider"
 )
 
-// DynamicModel 上游 chat scene 单个模型。
+// DynamicModel 上游模型条目（chat/assistant/developer 场景同构）。
 type DynamicModel struct {
 	Key            string  `json:"key"`
 	DisplayName    string  `json:"display_name"`
 	Enable         bool    `json:"enable"`
+	IsDefault      bool    `json:"is_default"`
 	IsReasoning    bool    `json:"is_reasoning"`
 	IsVL           bool    `json:"is_vl"`
 	MaxInputTokens int64   `json:"max_input_tokens"`
 	PriceFactor    float64 `json:"price_factor"`
+	Format         string  `json:"format"` // 上游声明的协议形态
+	Source         string  `json:"source"` // 上游声明来源；model_config.source 即思考总开关
+	ContextWindow  int64   `json:"-"`      // context_config.token_count 解析结果
+}
+
+// 上游未下发时的兜底值（与 qodercn/qodercom 一致）。
+const (
+	defaultFormat = "openai"
+	defaultSource = "system"
+)
+
+// contextConfig 形状：{"<label>": {"is_default":bool,"token_count":int}}
+type contextConfig map[string]struct {
+	IsDefault  bool  `json:"is_default"`
+	TokenCount int64 `json:"token_count"`
+}
+
+// tokenCount 取上游声明的上下文窗口：**只认标了 is_default 的那一档**。
+// 上游实测总是恰好标一档默认，未标默认时不猜——返回 0 让上层回退 max_input_tokens（保守方向）。
+// 多个档同时标默认时取最小值（确定性 + 保守），不依赖 map 迭代序。
+func (cc contextConfig) tokenCount() int64 {
+	var best int64
+	for _, cfg := range cc {
+		if !cfg.IsDefault || cfg.TokenCount <= 0 {
+			continue
+		}
+		if best == 0 || cfg.TokenCount < best {
+			best = cfg.TokenCount
+		}
+	}
+	return best
+}
+
+// modelWire 上游模型条目：在 DynamicModel 之外带上 context_config。
+// DynamicModel.ContextWindow 是 json:"-"，只能由此处解析后回填。
+type modelWire struct {
+	DynamicModel
+	ContextConfig json.RawMessage `json:"context_config"`
+}
+
+// contextWindow 解析 context_config 得到上下文窗口。
+// 用 RawMessage 承接：形状不符时只损失本字段，不会让整批模型解析失败。
+func (w modelWire) contextWindow() int64 {
+	if len(w.ContextConfig) == 0 {
+		return 0
+	}
+	var cc contextConfig
+	if err := json.Unmarshal(w.ContextConfig, &cc); err != nil {
+		return 0
+	}
+	return cc.tokenCount()
+}
+
+// parseSceneModels 解析模型列表响应：assistant→developer→chat 三级回退。
+// 上游把模型挪场景时（如迁到 assistant）不至于硬失败。
+func parseSceneModels(apiResp map[string]json.RawMessage) ([]DynamicModel, error) {
+	for _, scene := range []string{"assistant", "developer", "chat"} {
+		raw, ok := apiResp[scene]
+		if !ok {
+			continue
+		}
+		var wires []modelWire
+		if err := json.Unmarshal(raw, &wires); err != nil {
+			continue
+		}
+		enabled := make([]DynamicModel, 0, len(wires))
+		for _, w := range wires {
+			if !w.Enable || w.Key == "" {
+				continue
+			}
+			m := w.DynamicModel
+			m.ContextWindow = w.contextWindow() // 回填 context_config.token_count
+			enabled = append(enabled, m)
+		}
+		if len(enabled) > 0 {
+			return enabled, nil
+		}
+	}
+	return nil, fmt.Errorf("no enabled models in assistant/developer/chat scenes")
 }
 
 // fetchModels 调上游动态模型接口。
@@ -61,35 +141,19 @@ func (c *Client) fetchModels(a *auth.Auth) ([]DynamicModel, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, fmt.Errorf("models parse: %w", err)
 	}
-	chatRaw, ok := apiResp["chat"]
-	if !ok {
-		return nil, fmt.Errorf("no chat scene in models response")
-	}
-	var models []DynamicModel
-	if err := json.Unmarshal(chatRaw, &models); err != nil {
-		return nil, fmt.Errorf("chat scene parse: %w", err)
-	}
-	enabled := make([]DynamicModel, 0, len(models))
-	for _, m := range models {
-		if m.Enable && m.Key != "" {
-			enabled = append(enabled, m)
-		}
-	}
-	if len(enabled) == 0 {
-		return nil, fmt.Errorf("no enabled chat models")
-	}
-	return enabled, nil
+	return parseSceneModels(apiResp)
 }
 
 // FetchModels 实现 provider.Upstream：动态模型 → provider.ModelInfo。
 // 客户端名 = display_name 规范化（无 display_name 用 key 兜底）。
-// 同时把 客户端名→key 映射缓存到 Client，供 ChatStream 路由。
+// 同时把 客户端名→key 映射与 key→条目表缓存到 Client，供 ChatStream 路由与取 format/source。
 func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	dyn, err := c.fetchModels(a)
 	if err != nil {
 		return nil, err
 	}
 	mm := make(map[string]string, len(dyn))
+	entries := make(map[string]DynamicModel, len(dyn))
 	out := make([]provider.ModelInfo, 0, len(dyn))
 	for _, m := range dyn {
 		name := NormalizeModelName(m.DisplayName)
@@ -97,6 +161,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			name = m.Key
 		}
 		mm[name] = m.Key
+		entries[m.Key] = m
 		mi := provider.ModelInfo{
 			ID:            name,
 			Name:          m.DisplayName,
@@ -105,13 +170,18 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			SupportsImages:    m.IsVL,
 			SupportsReasoning: m.IsReasoning,
 		}
-		if m.MaxInputTokens > 0 {
+		// 上下文窗口：context_config 默认档优先，回退 max_input_tokens
+		if m.ContextWindow > 0 {
+			mi.ContextWindow = m.ContextWindow
+			mi.ContextFromAPI = true
+		} else if m.MaxInputTokens > 0 {
 			mi.ContextWindow = m.MaxInputTokens
 			mi.ContextFromAPI = true // 接口真实返回
 		}
 		out = append(out, mi)
 	}
 	c.setModelMap(mm)
+	c.setModelEntries(entries)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}

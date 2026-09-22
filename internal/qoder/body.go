@@ -11,12 +11,13 @@ import (
 // buildAgentBody 构造请求体。
 //   - messages：客户端原始消息列表（可含 system/assistant/tool 多轮）
 //   - modelKey：上游模型 key（如 dmodel）
+//   - mc：该模型的上游条目（可以为 nil，如走静态表兜底）；format/source 取自它
 //   - tools：客户端传来的 OpenAI tools 数组；为空则不注入 tools 字段
 //   - enableReasoning：是否启用思考模式
 //   - reasoningEffort：思考强度 low/medium/high，空串表示不传
 //
 // 注意：developer 角色必须改写为 system。
-func buildAgentBody(messages []map[string]any, modelKey string, tools []any, enableReasoning bool, reasoningEffort string) ([]byte, error) {
+func buildAgentBody(messages []map[string]any, modelKey string, mc *DynamicModel, tools []any, enableReasoning bool, reasoningEffort string) ([]byte, error) {
 	// developer → system（浅拷贝消息避免污染调用方数据）
 	msgs := make([]map[string]any, len(messages))
 	for i, m := range messages {
@@ -44,6 +45,19 @@ func buildAgentBody(messages []map[string]any, modelKey string, tools []any, ena
 	now := time.Now()
 	newUUID := uuid4()
 
+	// format/source 取上游真值，未下发（或走静态表兜底）时才用兜底常量。
+	// ⚠️ model_config.source 即思考总开关：旧实现完全不下发该字段（issue #32 思考过程不暴露）。
+	format := defaultFormat
+	source := defaultSource
+	if mc != nil {
+		if mc.Format != "" {
+			format = mc.Format
+		}
+		if mc.Source != "" {
+			source = mc.Source
+		}
+	}
+
 	base := map[string]any{
 		"request_id":       newUUID,
 		"chat_record_id":   newUUID,
@@ -56,7 +70,10 @@ func buildAgentBody(messages []map[string]any, modelKey string, tools []any, ena
 		"is_reply":         true,
 		"image_urls":       nil,
 		"session_type":     "qodercli",
-		"model_config":     map[string]any{"key": modelKey, "is_reasoning": enableReasoning},
+		"model_config": map[string]any{
+			"key": modelKey, "is_reasoning": enableReasoning,
+			"format": format, "source": source,
+		},
 		"chat_context": map[string]any{
 			"chatPrompt": "",
 			"text":       map[string]any{"type": "text", "text": prompt},
