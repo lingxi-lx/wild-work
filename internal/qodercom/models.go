@@ -26,6 +26,43 @@ type contextConfig map[string]struct {
 	TokenCount int64 `json:"token_count"`
 }
 
+// tokenCount 取上游声明的上下文窗口：**只认标记了 is_default 的那一档**。
+// 上游实测总是恰好标一档默认（COM 77/77、CN 104/104），未标默认时不猜——
+// 返回 0 让上层回退 max_input_tokens（保守方向），避免误取 1M 这类最大档。
+// 多个档同时标默认时取最小值（确定性 + 保守），不依赖 map 迭代序。
+func (cc contextConfig) tokenCount() int64 {
+	var best int64
+	for _, cfg := range cc {
+		if !cfg.IsDefault || cfg.TokenCount <= 0 {
+			continue
+		}
+		if best == 0 || cfg.TokenCount < best {
+			best = cfg.TokenCount
+		}
+	}
+	return best
+}
+
+// modelWire 上游模型表条目：在 ModelEntry 之外带上 context_config。
+// ModelEntry.ContextWindow 是 json:"-"（上游不直接下发该字段名），只能由此处解析后回填。
+type modelWire struct {
+	ModelEntry
+	ContextConfig json.RawMessage `json:"context_config"`
+}
+
+// contextWindow 解析 context_config 得到上下文窗口。
+// 用 RawMessage 承接：形状不符时只损失本字段，不会让整批模型解析失败。
+func (w modelWire) contextWindow() int64 {
+	if len(w.ContextConfig) == 0 {
+		return 0
+	}
+	var cc contextConfig
+	if err := json.Unmarshal(w.ContextConfig, &cc); err != nil {
+		return 0
+	}
+	return cc.tokenCount()
+}
+
 // parseDynamicModels 解析模型列表响应：assistant→developer→chat 三级回退。
 func parseDynamicModels(apiResp map[string]json.RawMessage) ([]ModelEntry, error) {
 	for _, scene := range []string{"assistant", "developer", "chat"} {
@@ -33,15 +70,18 @@ func parseDynamicModels(apiResp map[string]json.RawMessage) ([]ModelEntry, error
 		if !ok {
 			continue
 		}
-		var models []ModelEntry
-		if err := json.Unmarshal(raw, &models); err != nil {
+		var wires []modelWire
+		if err := json.Unmarshal(raw, &wires); err != nil {
 			continue
 		}
-		enabled := make([]ModelEntry, 0, len(models))
-		for _, m := range models {
-			if m.Enable && m.Key != "" {
-				enabled = append(enabled, m)
+		enabled := make([]ModelEntry, 0, len(wires))
+		for _, w := range wires {
+			if !w.Enable || w.Key == "" {
+				continue
 			}
+			m := w.ModelEntry
+			m.ContextWindow = w.contextWindow() // 回填 context_config.token_count
+			enabled = append(enabled, m)
 		}
 		if len(enabled) > 0 {
 			return enabled, nil

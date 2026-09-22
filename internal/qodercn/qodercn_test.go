@@ -68,6 +68,107 @@ func TestParseDynamicModelsScenesFallback(t *testing.T) {
 	}
 }
 
+// TestParseDynamicModelsContextWindow 验证解析端真的把 context_config 读进 ModelEntry。
+// 回归：此前 ContextWindow 是 json:"-" 且解析只 Unmarshal 到 ModelEntry，
+// context_config 被整段丢弃，导致永远回退到 max_input_tokens（恒为 180000 兜底）。
+func TestParseDynamicModelsContextWindow(t *testing.T) {
+	raw := map[string]json.RawMessage{
+		"assistant": json.RawMessage(`[
+			{"key":"m1","display_name":"M1","enable":true,"is_default":true,
+			 "is_reasoning":true,"is_vl":true,"max_input_tokens":180000,"price_factor":0.5,
+			 "context_config":{"default":{"is_default":true,"token_count":1000000},
+			                   "compact":{"is_default":false,"token_count":180000}}},
+			{"key":"m2","display_name":"M2","enable":true,"max_input_tokens":96000,"price_factor":0.1},
+			{"key":"m3","display_name":"M3","enable":true,"max_input_tokens":180000,
+			 "context_config":{"c":{"token_count":500000}}},
+			{"key":"m4","display_name":"M4","enable":true,"max_input_tokens":180000,
+			 "context_config":[{"token_count":7}]},
+			{"key":"m5","display_name":"M5","enable":true,"max_input_tokens":180000,
+			 "context_config":{"a":{"is_default":true,"token_count":400000},
+			                   "b":{"is_default":true,"token_count":272000}}},
+			{"key":"off","display_name":"OFF","enable":false,
+			 "context_config":{"d":{"is_default":true,"token_count":9}}}
+		]`),
+	}
+	ms, err := parseDynamicModels(raw)
+	if err != nil {
+		t.Fatalf("parseDynamicModels: %v", err)
+	}
+	if len(ms) != 5 {
+		t.Fatalf("enabled len = %d, want 5 (off 应被过滤)", len(ms))
+	}
+	// ① is_default 那项胜出，而不是 max_input_tokens 的 180000
+	if ms[0].ContextWindow != 1000000 {
+		t.Errorf("is_default token_count not parsed: %+v", ms[0])
+	}
+	// ② 无 context_config → 0，留给 toModelInfos 回退 max_input_tokens
+	if ms[1].ContextWindow != 0 {
+		t.Errorf("absent context_config should stay 0: %+v", ms[1])
+	}
+	// ③ **无 is_default 标记时不猜**：返回 0，让上层回退 max_input_tokens。
+	// 回归：曾按 label 字典序取最小项，而字典序首位是 "1M"，会取到**最大档**（不安全方向）。
+	if ms[2].ContextWindow != 0 {
+		t.Errorf("unmarked context_config must not be guessed: %+v", ms[2])
+	}
+	// ④ 形状不符（数组）只损失本字段，不应让整批模型解析失败
+	if ms[3].Key != "m4" || ms[3].ContextWindow != 0 {
+		t.Errorf("malformed context_config should degrade to 0: %+v", ms[3])
+	}
+	// ⑤ 多个档同时标默认 → 取最小值（确定性 + 保守，不依赖 map 迭代序）
+	if ms[4].ContextWindow != 272000 {
+		t.Errorf("multi-default should take min: %+v", ms[4])
+	}
+	// ⑥ 一路落到对外展示的 ContextWindow
+	infos := toModelInfos(ms)
+	if infos[0].ContextWindow != 1000000 || !infos[0].ContextFromAPI {
+		t.Errorf("toModelInfos[0]: %+v", infos[0])
+	}
+	if infos[1].ContextWindow != 96000 || !infos[1].ContextFromAPI {
+		t.Errorf("toModelInfos[1] max_input fallback: %+v", infos[1])
+	}
+	if infos[2].ContextWindow != 180000 {
+		t.Errorf("toModelInfos[2] should fall back to max_input: %+v", infos[2])
+	}
+}
+
+// TestBuildAgentBodyFormatSourceFromUpstream 验证 model_config 的 format/source 走**上游真值**，
+// 而非硬编码常量。P0b 实测两渠道 204/204 条目的 format/source 分别为 "openai"/"system"，
+// 故改前改后线上行为一致；本测试用非默认值证明真的是“取自上游”而非“恰好写对”。
+func TestBuildAgentBodyFormatSourceFromUpstream(t *testing.T) {
+	body, err := buildAgentBody(
+		[]map[string]any{{"role": "user", "content": "hi"}},
+		&ModelEntry{Key: "k1", DisplayName: "D1", Format: "up-format", Source: "up-source"},
+		nil, false, 0, "")
+	if err != nil {
+		t.Fatalf("buildAgentBody: %v", err)
+	}
+	var parsed struct {
+		ModelConfig map[string]any `json:"model_config"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if parsed.ModelConfig["format"] != "up-format" {
+		t.Errorf("model_config.format = %v, want upstream value", parsed.ModelConfig["format"])
+	}
+	if parsed.ModelConfig["source"] != "up-source" {
+		t.Errorf("model_config.source = %v, want upstream value", parsed.ModelConfig["source"])
+	}
+
+	// 上游未下发时才走兜底常量
+	body, err = buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
+		&ModelEntry{Key: "k2"}, nil, false, 0, "")
+	if err != nil {
+		t.Fatalf("buildAgentBody(fallback): %v", err)
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal body(fallback): %v", err)
+	}
+	if parsed.ModelConfig["format"] != defaultFormat || parsed.ModelConfig["source"] != defaultSource {
+		t.Errorf("empty upstream values should use fallback: %+v", parsed.ModelConfig)
+	}
+}
+
 // TestModelCacheNoStaticFallback 验证「上次成功缓存」语义：动态拉取失败回退缓存，无缓存报错。
 func TestModelCacheNoStaticFallback(t *testing.T) {
 	c := New()

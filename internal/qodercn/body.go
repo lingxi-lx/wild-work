@@ -111,19 +111,34 @@ type ModelEntry struct {
 	IsVL           bool    `json:"is_vl"`
 	MaxInputTokens int64   `json:"max_input_tokens"`
 	PriceFactor    float64 `json:"price_factor"`
-	ContextWindow  int64   `json:"-"` // context_config.token_count 解析结果
+	Format         string  `json:"format"` // 上游声明的协议形态（实测两渠道恒为 "openai"）
+	Source         string  `json:"source"` // 上游声明来源；model_config.source 即思考总开关
+	ContextWindow  int64   `json:"-"`      // context_config.token_count 解析结果
 }
+
+// 上游未下发时的兜底值（实测两渠道 204/204 条目均下发，此处仅防御）。
+const (
+	defaultFormat = "openai"
+	defaultSource = "system"
+)
 
 // modelConfigFrom 构造 model_config（qoder2api baseprompt.json 全字段形态）。
 func modelConfigFrom(m *ModelEntry, enableReasoning bool) map[string]any {
 	if m == nil || m.Key == "" {
 		return map[string]any{
-			"key": "auto", "display_name": "Auto", "model": "", "format": "openai",
+			"key": "auto", "display_name": "Auto", "model": "", "format": defaultFormat,
 			"is_vl": false, "is_reasoning": enableReasoning, "api_key": "", "url": "",
-			"source": "system", "max_input_tokens": 180000,
+			"source": defaultSource, "max_input_tokens": 180000,
 		}
 	}
-	format := "openai" // baseprompt 默认；上游未下发 format 字段时兜底
+	format := m.Format
+	if format == "" {
+		format = defaultFormat // 上游偶发未下发时兜底
+	}
+	source := m.Source
+	if source == "" {
+		source = defaultSource
+	}
 	maxIn := m.MaxInputTokens
 	if maxIn <= 0 {
 		maxIn = 180000
@@ -131,7 +146,7 @@ func modelConfigFrom(m *ModelEntry, enableReasoning bool) map[string]any {
 	return map[string]any{
 		"key": m.Key, "display_name": m.DisplayName, "model": "", "format": format,
 		"is_vl": m.IsVL, "is_reasoning": enableReasoning, "api_key": "", "url": "",
-		"source": "system", "max_input_tokens": maxIn,
+		"source": source, "max_input_tokens": maxIn,
 	}
 }
 
