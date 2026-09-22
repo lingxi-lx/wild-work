@@ -17,9 +17,10 @@ import (
 //   - tools：客户端传来的 OpenAI tools 数组；为空则不注入 tools 字段
 //   - enableReasoning：是否启用思考模式
 //   - maxTokens：客户端请求的 max_tokens，<=0 时用模板默认 32768
+//   - contextWindow：选定的上下文档位（200K/400K/1M）；<=0 时不注入 context_length
 //
 // 注意：developer 角色必须改写为 system。
-func buildAgentBody(messages []map[string]any, mc *ModelEntry, tools []any, enableReasoning bool, maxTokens int, userType string) ([]byte, error) {
+func buildAgentBody(messages []map[string]any, mc *ModelEntry, tools []any, enableReasoning bool, maxTokens int, userType string, contextWindow int64) ([]byte, error) {
 	// developer → system（浅拷贝消息避免污染调用方数据）
 	msgs := make([]map[string]any, len(messages))
 	for i, m := range messages {
@@ -52,6 +53,15 @@ func buildAgentBody(messages []map[string]any, mc *ModelEntry, tools []any, enab
 	}
 	modelCfg := modelConfigFrom(mc, enableReasoning)
 
+	// 上下文档位透传（issue #27）：官方 worker 仅写 parameters.context_length
+	// （经 TZ 校验 ∈ available_context_windows）；9router 另同步 model_config.max_input_tokens。
+	// 此处对齐 9router：两者都写，避免 catalog max_input_tokens 停在 180000 时档位选了却不生效。
+	params := map[string]any{"max_tokens": maxTokens}
+	if contextWindow > 0 {
+		params["context_length"] = contextWindow
+		modelCfg["max_input_tokens"] = contextWindow
+	}
+
 	now := time.Now()
 	newUUID := uuid4()
 
@@ -72,7 +82,7 @@ func buildAgentBody(messages []map[string]any, mc *ModelEntry, tools []any, enab
 		"version":       "3",
 		"chat_prompt":   "",
 		"task_id":       "common",
-		"parameters":    map[string]any{"max_tokens": maxTokens},
+		"parameters":    params,
 		"session_type":  "qoder", // qoderwork 渠道是 "qodercli"
 		"model_config":  modelCfg,
 		"chat_context": map[string]any{
@@ -113,7 +123,9 @@ type ModelEntry struct {
 	PriceFactor    float64 `json:"price_factor"`
 	Format         string  `json:"format"` // 上游声明的协议形态（实测两渠道恒为 "openai"）
 	Source         string  `json:"source"` // 上游声明来源；model_config.source 即思考总开关
-	ContextWindow  int64   `json:"-"`      // context_config.token_count 解析结果
+	ContextWindow  int64   `json:"-"`      // context_config 默认档（is_default）的 token_count
+	// AvailableWindows context_config 全部档位（升序）；空表示无档位表。
+	AvailableWindows []int64 `json:"-"`
 }
 
 // 上游未下发时的兜底值（实测两渠道 204/204 条目均下发，此处仅防御）。
@@ -153,6 +165,68 @@ func modelConfigFrom(m *ModelEntry, enableReasoning bool) map[string]any {
 // copyModelConfigLite chat_context.extra.modelConfig 仅需 key/is_reasoning（模板形态）。
 func copyModelConfigLite(mc map[string]any) map[string]any {
 	return map[string]any{"key": mc["key"], "is_reasoning": mc["is_reasoning"]}
+}
+
+// resolveContextWindow 解析本次请求应使用的上下文档位。
+//   - requested：客户端显式传入（context_length/context_window），0 表示未指定
+//   - mc：模型条目，可为 nil
+//
+// 客户端值校验对齐官方 TZ（∈档位表 / ≤max_input_tokens）；默认档与非法值落点
+// 本仓决议取 max(AvailableWindows)（宁高勿低，对齐 workbuddy2api 广告口径），
+// 而非官方 FHA 的 is_default 档：
+//  1. requested>0 且校验通过 → 用 requested
+//  2. 否则 → max(AvailableWindows)（有档位表时）
+//  3. 否则 → ContextWindow（is_default）→ MaxInputTokens → 0（不注入）
+func resolveContextWindow(requested int64, mc *ModelEntry) int64 {
+	if requested > 0 {
+		if mc == nil {
+			return requested
+		}
+		if len(mc.AvailableWindows) > 0 {
+			for _, w := range mc.AvailableWindows {
+				if w == requested {
+					return requested
+				}
+			}
+			// 不在表内 → 落最大档（本仓默认）
+		} else {
+			// 无档位表：≤ max_input_tokens 或无上限则接受（官方 TZ 回退）
+			if mc.MaxInputTokens <= 0 || requested <= mc.MaxInputTokens {
+				return requested
+			}
+		}
+	}
+	if mc == nil {
+		return 0
+	}
+	if n := len(mc.AvailableWindows); n > 0 {
+		return mc.AvailableWindows[n-1] // 升序，取最大档
+	}
+	if mc.ContextWindow > 0 {
+		return mc.ContextWindow
+	}
+	if mc.MaxInputTokens > 0 {
+		return mc.MaxInputTokens
+	}
+	return 0
+}
+
+// parseContextWindowHint 从 OpenAI 请求体读取客户端上下文档位提示。
+// 同时认 context_length（上游参数名）与 context_window（官方 SDK 驼峰名）。
+// 非法/缺省返回 0。
+func parseContextWindowHint(body []byte) int64 {
+	var hint struct {
+		ContextLength int64 `json:"context_length"`
+		ContextWindow int64 `json:"context_window"`
+	}
+	// 只扫两个字段：body 里其余未知字段忽略
+	if err := json.Unmarshal(body, &hint); err != nil {
+		return 0
+	}
+	if hint.ContextLength > 0 {
+		return hint.ContextLength
+	}
+	return hint.ContextWindow
 }
 
 // truncateRunes 截断到 n 个 rune。

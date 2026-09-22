@@ -118,7 +118,7 @@ func TestParseDynamicModelsContextWindow(t *testing.T) {
 	if ms[4].ContextWindow != 272000 {
 		t.Errorf("multi-default should take min: %+v", ms[4])
 	}
-	// ⑥ 一路落到对外展示的 ContextWindow
+	// ⑥ 一路落到对外展示的 ContextWindow：宁高勿低 → max(档位表)
 	infos := toModelInfos(ms)
 	if infos[0].ContextWindow != 1000000 || !infos[0].ContextFromAPI {
 		t.Errorf("toModelInfos[0]: %+v", infos[0])
@@ -126,8 +126,9 @@ func TestParseDynamicModelsContextWindow(t *testing.T) {
 	if infos[1].ContextWindow != 96000 || !infos[1].ContextFromAPI {
 		t.Errorf("toModelInfos[1] max_input fallback: %+v", infos[1])
 	}
-	if infos[2].ContextWindow != 180000 {
-		t.Errorf("toModelInfos[2] should fall back to max_input: %+v", infos[2])
+	// 无 is_default 但有档位表 → 广告最大档（而非回退 max_input_tokens=180000）
+	if infos[2].ContextWindow != 500000 {
+		t.Errorf("toModelInfos[2] should advertise max tier: %+v", infos[2])
 	}
 }
 
@@ -138,7 +139,7 @@ func TestBuildAgentBodyFormatSourceFromUpstream(t *testing.T) {
 	body, err := buildAgentBody(
 		[]map[string]any{{"role": "user", "content": "hi"}},
 		&ModelEntry{Key: "k1", DisplayName: "D1", Format: "up-format", Source: "up-source"},
-		nil, false, 0, "")
+		nil, false, 0, "", 0)
 	if err != nil {
 		t.Fatalf("buildAgentBody: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestBuildAgentBodyFormatSourceFromUpstream(t *testing.T) {
 
 	// 上游未下发时才走兜底常量
 	body, err = buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
-		&ModelEntry{Key: "k2"}, nil, false, 0, "")
+		&ModelEntry{Key: "k2"}, nil, false, 0, "", 0)
 	if err != nil {
 		t.Fatalf("buildAgentBody(fallback): %v", err)
 	}
@@ -186,10 +187,11 @@ func TestModelCacheNoStaticFallback(t *testing.T) {
 	}
 }
 
-// TestToModelInfosContextWindow 验证 context_config 优先于 max_input_tokens。
+// TestToModelInfosContextWindow 验证广告口径：max(档位表) > is_default > max_input_tokens。
 func TestToModelInfosContextWindow(t *testing.T) {
 	dyn := []ModelEntry{
-		{Key: "m1", DisplayName: "M1", MaxInputTokens: 100000, ContextWindow: 200000},
+		{Key: "m1", DisplayName: "M1", MaxInputTokens: 100000, ContextWindow: 200000,
+			AvailableWindows: []int64{200000, 400000, 1000000}},
 		{Key: "m2", DisplayName: "M2", MaxInputTokens: 150000},
 		{Key: "m3", DisplayName: "M3", IsVL: true, IsReasoning: true},
 	}
@@ -197,8 +199,9 @@ func TestToModelInfosContextWindow(t *testing.T) {
 	if len(infos) != 3 {
 		t.Fatalf("len = %d", len(infos))
 	}
-	if infos[0].ContextWindow != 200000 || !infos[0].ContextFromAPI {
-		t.Errorf("context_config should win: %+v", infos[0])
+	// 有档位表 → 广告最大档（而非 is_default=200000）
+	if infos[0].ContextWindow != 1000000 || !infos[0].ContextFromAPI {
+		t.Errorf("max tier should win: %+v", infos[0])
 	}
 	if infos[1].ContextWindow != 150000 {
 		t.Errorf("max_input fallback: %+v", infos[1])
@@ -339,7 +342,7 @@ func TestBuildAgentBodyShape(t *testing.T) {
 	mc := &ModelEntry{Key: "gmodel", DisplayName: "GLM-5.3", MaxInputTokens: 180000}
 	raw, err := buildAgentBody(
 		[]map[string]any{{"role": "developer", "content": "sys"}, {"role": "user", "content": "hi"}},
-		mc, nil, true, 0, "personal_standard")
+		mc, nil, true, 0, "personal_standard", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,5 +386,99 @@ func TestClassifyOrder(t *testing.T) {
 	}
 	if got := Classify(401, `{"code":"TOKEN_EXPIRE"}`); got != provider.ErrSessionDead {
 		t.Errorf("TOKEN_EXPIRE should be session dead, got %v", got)
+	}
+}
+
+// TestResolveContextWindow 验证上下文档位解析（TZ 校验 + 本仓默认最大档）。
+func TestResolveContextWindow(t *testing.T) {
+	mc := &ModelEntry{
+		Key: "m", MaxInputTokens: 180000,
+		ContextWindow:    200000, // is_default 档
+		AvailableWindows: []int64{200000, 400000, 1000000},
+	}
+	// ① 客户端指定档位 ∈ 表 → 用指定值
+	if got := resolveContextWindow(400000, mc); got != 400000 {
+		t.Errorf("valid tier: got %d, want 400000", got)
+	}
+	// ② 客户端指定不在表内 → 落最大档（本仓默认，非官方 is_default）
+	if got := resolveContextWindow(300000, mc); got != 1000000 {
+		t.Errorf("invalid tier → max: got %d, want 1000000", got)
+	}
+	// ③ 未指定 → 最大档
+	if got := resolveContextWindow(0, mc); got != 1000000 {
+		t.Errorf("no hint → max: got %d, want 1000000", got)
+	}
+	// ④ 无档位表：≤ max_input_tokens 接受
+	mc2 := &ModelEntry{Key: "m2", MaxInputTokens: 180000}
+	if got := resolveContextWindow(128000, mc2); got != 128000 {
+		t.Errorf("no table, within max: got %d, want 128000", got)
+	}
+	if got := resolveContextWindow(200000, mc2); got != 180000 {
+		t.Errorf("no table, over max → fallback max: got %d, want 180000", got)
+	}
+	// ⑤ 无条目 → 0（不注入）
+	if got := resolveContextWindow(0, nil); got != 0 {
+		t.Errorf("nil entry: got %d, want 0", got)
+	}
+}
+
+// TestBuildAgentBodyContextLength 验证 context_length 注入 parameters + model_config.max_input_tokens。
+func TestBuildAgentBodyContextLength(t *testing.T) {
+	mc := &ModelEntry{Key: "k", DisplayName: "K", MaxInputTokens: 180000}
+	// 指定档位
+	raw, err := buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
+		mc, nil, false, 0, "", 400000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Parameters  map[string]any `json:"parameters"`
+		ModelConfig map[string]any `json:"model_config"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Parameters["context_length"] != float64(400000) {
+		t.Errorf("parameters.context_length = %v, want 400000", body.Parameters["context_length"])
+	}
+	if body.ModelConfig["max_input_tokens"] != float64(400000) {
+		t.Errorf("model_config.max_input_tokens = %v, want 400000", body.ModelConfig["max_input_tokens"])
+	}
+	// 不指定 → 不注入 context_length
+	raw, err = buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
+		mc, nil, false, 0, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = struct {
+		Parameters  map[string]any `json:"parameters"`
+		ModelConfig map[string]any `json:"model_config"`
+	}{}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := body.Parameters["context_length"]; has {
+		t.Errorf("context_length should be absent when window=0: %v", body.Parameters)
+	}
+	// max_tokens 始终存在
+	if body.Parameters["max_tokens"] != float64(32768) {
+		t.Errorf("max_tokens = %v", body.Parameters["max_tokens"])
+	}
+}
+
+// TestParseContextWindowHint 两种字段名别名。
+func TestParseContextWindowHint(t *testing.T) {
+	if got := parseContextWindowHint([]byte(`{"context_length":1000000}`)); got != 1000000 {
+		t.Errorf("context_length: got %d", got)
+	}
+	if got := parseContextWindowHint([]byte(`{"context_window":400000}`)); got != 400000 {
+		t.Errorf("context_window: got %d", got)
+	}
+	// context_length 优先
+	if got := parseContextWindowHint([]byte(`{"context_length":200000,"context_window":400000}`)); got != 200000 {
+		t.Errorf("priority: got %d", got)
+	}
+	if got := parseContextWindowHint([]byte(`{"model":"x"}`)); got != 0 {
+		t.Errorf("absent: got %d", got)
 	}
 }

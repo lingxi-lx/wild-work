@@ -43,6 +43,29 @@ func (cc contextConfig) tokenCount() int64 {
 	return best
 }
 
+// windows 返回 context_config 全部档位（升序、去重、>0），供选档校验。
+func (cc contextConfig) windows() []int64 {
+	seen := make(map[int64]struct{}, len(cc))
+	out := make([]int64, 0, len(cc))
+	for _, cfg := range cc {
+		if cfg.TokenCount <= 0 {
+			continue
+		}
+		if _, ok := seen[cfg.TokenCount]; ok {
+			continue
+		}
+		seen[cfg.TokenCount] = struct{}{}
+		out = append(out, cfg.TokenCount)
+	}
+	// 插入排序（档位数 ≤4，无需 sort 包）
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
 // modelWire 上游模型表条目：在 ModelEntry 之外带上 context_config。
 // ModelEntry.ContextWindow 是 json:"-"（上游不直接下发该字段名），只能由此处解析后回填。
 type modelWire struct {
@@ -50,17 +73,23 @@ type modelWire struct {
 	ContextConfig json.RawMessage `json:"context_config"`
 }
 
-// contextWindow 解析 context_config 得到上下文窗口。
+// parseContextConfig 解析 context_config → (默认档, 全部档位)。
 // 用 RawMessage 承接：形状不符时只损失本字段，不会让整批模型解析失败。
-func (w modelWire) contextWindow() int64 {
+func (w modelWire) parseContextConfig() (int64, []int64) {
 	if len(w.ContextConfig) == 0 {
-		return 0
+		return 0, nil
 	}
 	var cc contextConfig
 	if err := json.Unmarshal(w.ContextConfig, &cc); err != nil {
-		return 0
+		return 0, nil
 	}
-	return cc.tokenCount()
+	return cc.tokenCount(), cc.windows()
+}
+
+// contextWindow 解析 context_config 得到默认档上下文窗口（兼容旧调用点）。
+func (w modelWire) contextWindow() int64 {
+	def, _ := w.parseContextConfig()
+	return def
 }
 
 // parseDynamicModels 解析模型列表响应：assistant→developer→chat 三级回退。
@@ -80,7 +109,7 @@ func parseDynamicModels(apiResp map[string]json.RawMessage) ([]ModelEntry, error
 				continue
 			}
 			m := w.ModelEntry
-			m.ContextWindow = w.contextWindow() // 回填 context_config.token_count
+			m.ContextWindow, m.AvailableWindows = w.parseContextConfig() // 默认档 + 全档位
 			enabled = append(enabled, m)
 		}
 		if len(enabled) > 0 {
@@ -201,8 +230,12 @@ func toModelInfos(dyn []ModelEntry) []provider.ModelInfo {
 			SupportsImages:    m.IsVL,
 			SupportsReasoning: m.IsReasoning,
 		}
-		// 上下文窗口：context_config.token_count 优先，回退 max_input_tokens（qoder2api 形态）
-		if m.ContextWindow > 0 {
+		// 上下文窗口：广告宁高勿低——max(档位表) > is_default 档 > max_input_tokens
+		// （与 resolveContextWindow 默认档一致，对齐 workbuddy2api 口径）
+		if n := len(m.AvailableWindows); n > 0 {
+			mi.ContextWindow = m.AvailableWindows[n-1]
+			mi.ContextFromAPI = true
+		} else if m.ContextWindow > 0 {
 			mi.ContextWindow = m.ContextWindow
 			mi.ContextFromAPI = true
 		} else if m.MaxInputTokens > 0 {

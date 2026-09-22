@@ -25,9 +25,9 @@ import (
 
 // Client QoderCOM 上游客户端。
 type Client struct {
-	HTTP    *http.Client
-	Base    string // 业务 API，默认 https://openapi.qoder.sh
-	Gateway string // 推理网关，默认 https://api1.qoder.sh
+	HTTP       *http.Client
+	Base       string // 业务 API，默认 https://openapi.qoder.sh
+	Gateway    string // 推理网关，默认 https://api1.qoder.sh
 	ModelsBase string // 模型列表，默认 https://api2.qoder.sh
 
 	// modelMap 客户端名（display_name 规范化）→ 上游 model key；
@@ -37,7 +37,7 @@ type Client struct {
 	cache    []ModelEntry
 
 	// utMu 保护 uid→userType 实测缓存（登录后/首次请求时填充）。
-	utMu   sync.RWMutex
+	utMu      sync.RWMutex
 	userTypes map[string]string
 }
 
@@ -55,12 +55,12 @@ func NewWithTimeout(timeout time.Duration) *Client {
 		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{}, // 强制 HTTP/1.1
 	}
 	return &Client{
-		HTTP:      &http.Client{Timeout: timeout, Transport: tr},
-		Base:      OpenAPIBase,
-		Gateway:   GatewayBase,
+		HTTP:       &http.Client{Timeout: timeout, Transport: tr},
+		Base:       OpenAPIBase,
+		Gateway:    GatewayBase,
 		ModelsBase: ModelsBase,
-		modelMap:  map[string]string{},
-		userTypes: map[string]string{},
+		modelMap:   map[string]string{},
+		userTypes:  map[string]string{},
 	}
 }
 
@@ -291,7 +291,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		enableReasoning = true
 	}
 
-	rawBody, err := buildAgentBody(reqOpenAI.Messages, c.modelEntry(modelKey), reqOpenAI.Tools, enableReasoning, reqOpenAI.MaxTokens, c.userTypeOf(a))
+	// 上下文档位（issue #27）：客户端 context_length/context_window 提示 → 模型默认档
+	mc := c.modelEntry(modelKey)
+	contextWindow := resolveContextWindow(parseContextWindowHint(body), mc)
+
+	rawBody, err := buildAgentBody(reqOpenAI.Messages, mc, reqOpenAI.Tools, enableReasoning, reqOpenAI.MaxTokens, c.userTypeOf(a), contextWindow)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build qodercom body: %w", err)
 	}

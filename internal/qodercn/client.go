@@ -36,7 +36,7 @@ type Client struct {
 	cache    []ModelEntry
 
 	// utMu 保护 uid→userType 实测缓存（登录后/首次请求时填充）。
-	utMu   sync.RWMutex
+	utMu      sync.RWMutex
 	userTypes map[string]string
 }
 
@@ -289,7 +289,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		enableReasoning = true
 	}
 
-	rawBody, err := buildAgentBody(reqOpenAI.Messages, c.modelEntry(modelKey), reqOpenAI.Tools, enableReasoning, reqOpenAI.MaxTokens, c.userTypeOf(a))
+	// 上下文档位（issue #27）：客户端 context_length/context_window 提示 → 模型默认档
+	mc := c.modelEntry(modelKey)
+	contextWindow := resolveContextWindow(parseContextWindowHint(body), mc)
+
+	rawBody, err := buildAgentBody(reqOpenAI.Messages, mc, reqOpenAI.Tools, enableReasoning, reqOpenAI.MaxTokens, c.userTypeOf(a), contextWindow)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build qodercn body: %w", err)
 	}

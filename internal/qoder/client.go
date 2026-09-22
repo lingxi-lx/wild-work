@@ -241,7 +241,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		enableReasoning = true
 	}
 
-	rawBody, err := buildAgentBody(reqOpenAI.Messages, modelKey, entry, reqOpenAI.Tools, enableReasoning, reasoningEffort)
+	// 上下文档位（issue #27）：客户端 context_length/context_window 提示 → 模型默认档
+	contextWindow := resolveContextWindow(parseContextWindowHint(body), entry)
+
+	rawBody, err := buildAgentBody(reqOpenAI.Messages, modelKey, entry, reqOpenAI.Tools, enableReasoning, reasoningEffort, contextWindow)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build qoder body: %w", err)
 	}

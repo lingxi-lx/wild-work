@@ -28,7 +28,9 @@ type DynamicModel struct {
 	PriceFactor    float64 `json:"price_factor"`
 	Format         string  `json:"format"` // 上游声明的协议形态
 	Source         string  `json:"source"` // 上游声明来源；model_config.source 即思考总开关
-	ContextWindow  int64   `json:"-"`      // context_config.token_count 解析结果
+	ContextWindow  int64   `json:"-"`      // context_config 默认档（is_default）的 token_count
+	// AvailableWindows context_config 全部档位（升序）；空表示无档位表。
+	AvailableWindows []int64 `json:"-"`
 }
 
 // 上游未下发时的兜底值（与 qodercn/qodercom 一致）。
@@ -59,6 +61,29 @@ func (cc contextConfig) tokenCount() int64 {
 	return best
 }
 
+// windows 返回 context_config 全部档位（升序、去重、>0），供选档校验。
+func (cc contextConfig) windows() []int64 {
+	seen := make(map[int64]struct{}, len(cc))
+	out := make([]int64, 0, len(cc))
+	for _, cfg := range cc {
+		if cfg.TokenCount <= 0 {
+			continue
+		}
+		if _, ok := seen[cfg.TokenCount]; ok {
+			continue
+		}
+		seen[cfg.TokenCount] = struct{}{}
+		out = append(out, cfg.TokenCount)
+	}
+	// 插入排序（档位数 ≤4，无需 sort 包）
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j] < out[j-1]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
 // modelWire 上游模型条目：在 DynamicModel 之外带上 context_config。
 // DynamicModel.ContextWindow 是 json:"-"，只能由此处解析后回填。
 type modelWire struct {
@@ -66,17 +91,23 @@ type modelWire struct {
 	ContextConfig json.RawMessage `json:"context_config"`
 }
 
-// contextWindow 解析 context_config 得到上下文窗口。
+// parseContextConfig 解析 context_config → (默认档, 全部档位)。
 // 用 RawMessage 承接：形状不符时只损失本字段，不会让整批模型解析失败。
-func (w modelWire) contextWindow() int64 {
+func (w modelWire) parseContextConfig() (int64, []int64) {
 	if len(w.ContextConfig) == 0 {
-		return 0
+		return 0, nil
 	}
 	var cc contextConfig
 	if err := json.Unmarshal(w.ContextConfig, &cc); err != nil {
-		return 0
+		return 0, nil
 	}
-	return cc.tokenCount()
+	return cc.tokenCount(), cc.windows()
+}
+
+// contextWindow 解析 context_config 得到默认档上下文窗口（兼容旧调用点）。
+func (w modelWire) contextWindow() int64 {
+	def, _ := w.parseContextConfig()
+	return def
 }
 
 // parseSceneModels 解析模型列表响应：assistant→developer→chat 三级回退。
@@ -97,7 +128,7 @@ func parseSceneModels(apiResp map[string]json.RawMessage) ([]DynamicModel, error
 				continue
 			}
 			m := w.DynamicModel
-			m.ContextWindow = w.contextWindow() // 回填 context_config.token_count
+			m.ContextWindow, m.AvailableWindows = w.parseContextConfig() // 默认档 + 全档位
 			enabled = append(enabled, m)
 		}
 		if len(enabled) > 0 {
@@ -170,8 +201,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 			SupportsImages:    m.IsVL,
 			SupportsReasoning: m.IsReasoning,
 		}
-		// 上下文窗口：context_config 默认档优先，回退 max_input_tokens
-		if m.ContextWindow > 0 {
+		// 上下文窗口：广告宁高勿低——max(档位表) > is_default 档 > max_input_tokens
+		// （与 resolveContextWindow 默认档一致，对齐 workbuddy2api 口径）
+		if n := len(m.AvailableWindows); n > 0 {
+			mi.ContextWindow = m.AvailableWindows[n-1]
+			mi.ContextFromAPI = true
+		} else if m.ContextWindow > 0 {
 			mi.ContextWindow = m.ContextWindow
 			mi.ContextFromAPI = true
 		} else if m.MaxInputTokens > 0 {

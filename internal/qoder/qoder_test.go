@@ -80,7 +80,7 @@ func TestBuildAgentBodyDeveloperToSystem(t *testing.T) {
 		{"role": "system", "content": "保持简洁"},
 		{"role": "user", "content": "你好"},
 	}
-	raw, err := buildAgentBody(msgs, "dmodel", nil, nil, false, "")
+	raw, err := buildAgentBody(msgs, "dmodel", nil, nil, false, "", 0)
 	if err != nil {
 		t.Fatalf("buildAgentBody: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestParseSceneModelsContextWindow(t *testing.T) {
 // （DEVELOPMENT.md §8 已记为 issue #32：旧 Qoder 思考过程不暴露）。
 func TestBuildAgentBodyFormatSourceFromUpstream(t *testing.T) {
 	body, err := buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
-		"k1", &DynamicModel{Key: "k1", Format: "up-format", Source: "up-source"}, nil, false, "")
+		"k1", &DynamicModel{Key: "k1", Format: "up-format", Source: "up-source"}, nil, false, "", 0)
 	if err != nil {
 		t.Fatalf("buildAgentBody: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestBuildAgentBodyFormatSourceFromUpstream(t *testing.T) {
 
 	// 静态表兜底路径（mc == nil）→ 用兜底常量
 	body, err = buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
-		"dmodel", nil, nil, false, "")
+		"dmodel", nil, nil, false, "", 0)
 	if err != nil {
 		t.Fatalf("buildAgentBody(nil entry): %v", err)
 	}
@@ -231,5 +231,57 @@ func TestModelEntryLookup(t *testing.T) {
 	}
 	if e := c.modelEntry("nope"); e != nil {
 		t.Errorf("missing key should be nil, got %+v", e)
+	}
+}
+
+// TestBuildAgentBodyContextLength 验证 context_length 注入（issue #27）。
+func TestBuildAgentBodyContextLength(t *testing.T) {
+	mc := &DynamicModel{Key: "k", MaxInputTokens: 180000, ContextWindow: 200000}
+	raw, err := buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
+		"k", mc, nil, false, "", 400000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Parameters  map[string]any `json:"parameters"`
+		ModelConfig map[string]any `json:"model_config"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Parameters["context_length"] != float64(400000) {
+		t.Errorf("context_length = %v", body.Parameters["context_length"])
+	}
+	if body.ModelConfig["max_input_tokens"] != float64(400000) {
+		t.Errorf("max_input_tokens = %v", body.ModelConfig["max_input_tokens"])
+	}
+	// window=0 且无 effort → 无 parameters 字段
+	raw, err = buildAgentBody([]map[string]any{{"role": "user", "content": "hi"}},
+		"k", mc, nil, false, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body2 map[string]any
+	if err := json.Unmarshal(raw, &body2); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := body2["parameters"]; has {
+		t.Errorf("parameters should be absent when no window/effort: %v", body2["parameters"])
+	}
+}
+
+// TestResolveContextWindow TZ 校验 + 本仓默认最大档。
+func TestResolveContextWindow(t *testing.T) {
+	mc := &DynamicModel{Key: "m", MaxInputTokens: 180000, ContextWindow: 200000,
+		AvailableWindows: []int64{200000, 400000, 1000000}}
+	if got := resolveContextWindow(400000, mc); got != 400000 {
+		t.Errorf("valid: got %d", got)
+	}
+	// 非法值与未指定 → 最大档（本仓默认，非官方 is_default）
+	if got := resolveContextWindow(999, mc); got != 1000000 {
+		t.Errorf("invalid → max: got %d, want 1000000", got)
+	}
+	if got := resolveContextWindow(0, mc); got != 1000000 {
+		t.Errorf("default → max: got %d, want 1000000", got)
 	}
 }
