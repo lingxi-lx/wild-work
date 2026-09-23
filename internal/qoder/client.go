@@ -26,9 +26,11 @@ type Client struct {
 	Gateway string // 推理网关，默认 https://gateway.qoder.com.cn
 
 	// modelMap 客户端名（display_name 规范化）→ 上游 model key。
-	// 由 FetchModels 填充；ChatStream 优先查此表，查不到再查静态表。
+	// entries 上游 model key → 模型条目（供 ChatStream 取 format/source 等上游真值）。
+	// 均由 FetchModels 填充；ChatStream 优先查此表，查不到再查静态表。
 	modelMu  sync.RWMutex
 	modelMap map[string]string
+	entries  map[string]DynamicModel
 }
 
 // New 生产默认。Qoder gateway 对 HTTP/2 不友好（stream INTERNAL_ERROR），强制 HTTP/1.1。
@@ -64,6 +66,24 @@ func (c *Client) setModelMap(m map[string]string) {
 	c.modelMu.Lock()
 	c.modelMap = m
 	c.modelMu.Unlock()
+}
+
+// setModelEntries 记录 上游 key → 模型条目 表（与 setModelMap 同批写入）。
+func (c *Client) setModelEntries(entries map[string]DynamicModel) {
+	c.modelMu.Lock()
+	c.entries = entries
+	c.modelMu.Unlock()
+}
+
+// modelEntry 上游 model key → 模型条目；未命中（如走静态表兜底）返回 nil。
+func (c *Client) modelEntry(key string) *DynamicModel {
+	c.modelMu.RLock()
+	defer c.modelMu.RUnlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return nil
+	}
+	return &e
 }
 
 // modelKey 客户端模型名 → 上游 model key：动态映射优先，静态表兜底。
@@ -209,6 +229,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if modelKey == "" {
 		modelKey = reqOpenAI.Model
 	}
+	entry := c.modelEntry(modelKey) // 上游真值 format/source；未命中为 nil
 
 	// 思考开关：reasoning_effort 或 thinking:{type:"enabled"} → 启用推理
 	enableReasoning := false
@@ -220,7 +241,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		enableReasoning = true
 	}
 
-	rawBody, err := buildAgentBody(reqOpenAI.Messages, modelKey, reqOpenAI.Tools, enableReasoning, reasoningEffort)
+	// 上下文档位（issue #27）：客户端 context_length/context_window 提示 → 模型默认档
+	contextWindow := resolveContextWindow(parseContextWindowHint(body), entry)
+
+	rawBody, err := buildAgentBody(reqOpenAI.Messages, modelKey, entry, reqOpenAI.Tools, enableReasoning, reasoningEffort, contextWindow)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build qoder body: %w", err)
 	}
