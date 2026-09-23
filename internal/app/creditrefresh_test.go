@@ -69,7 +69,9 @@ func (f *fakeUpstream) Classify(status int, body string) provider.ErrKind {
 	return provider.ErrNone
 }
 
-func (f *fakeUpstream) Stream(w http.ResponseWriter, r io.Reader, model string) error { return nil }
+func (f *fakeUpstream) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
+	return nil, nil
+}
 
 func (f *fakeUpstream) Aggregate(r io.Reader, model string) (map[string]any, error) { return nil, nil }
 

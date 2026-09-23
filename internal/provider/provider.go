@@ -18,11 +18,12 @@ const (
 	WorkBuddy   Kind = "workbuddy"
 	WorkBuddyAI Kind = "workbuddyai" // WorkBuddy 国际版（www.workbuddy.ai），与国内版完全独立
 	TraeWork    Kind = "traework"
-	Qoder       Kind = "qoder"      // QoderWork（qoder.com.cn，移植自 qoderwork2api）
-	QoderCN     Kind = "qodercn"    // QoderCN（qoder.com.cn，移植自 qoder2api，独立渠道）
-	QoderCOM    Kind = "qodercom"   // QoderCOM 国际版（qoder.com / qoder.sh，移植自 qodercn）
-	QwenWork    Kind = "qwenwork"   // 千问办公（gateway.qwenwork.cn + qwenwork.cn）
-	TraeCode    Kind = "traecode"   // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
+	Qoder       Kind = "qoder"    // QoderWork（qoder.com.cn，移植自 qoderwork2api）
+	QoderCN     Kind = "qodercn"  // QoderCN（qoder.com.cn，移植自 qoder2api，独立渠道）
+	QoderCOM    Kind = "qodercom" // QoderCOM 国际版（qoder.com / qoder.sh，移植自 qodercn）
+	QwenWork    Kind = "qwenwork" // 千问办公（gateway.qwenwork.cn + qwenwork.cn）
+	TraeCode    Kind = "traecode" // Trae 代码版：与 TraeWork 同一上游、共用账号，function=solo_agent
+	Oczen       Kind = "oczen"    // OpenCodeZen 匿名免费通道（opencode.ai/zen，无账号、凭证固定 public）
 )
 
 func (k Kind) String() string { return string(k) }
@@ -31,18 +32,19 @@ func (k Kind) String() string { return string(k) }
 type ErrKind int
 
 const (
-	ErrNone        ErrKind = iota // 成功
-	ErrHardCredit                 // 余额/权益不足 → 长冷却
-	ErrSoftRate                   // 429 软限流 → 短冷却
-	ErrSessionDead                // 登录态失效 → 禁用
-	ErrNotFound                   // 404 上游偶发 → 短冷却不累计 errCount
-	ErrServer                     // 5xx 上游故障
-	ErrClient                     // 其他 4xx / 业务错误
-	ErrContentBlocked             // 内容策略拦截（400 + 审核文案）→ 不罚账号，透传原文
-	ErrPromptTooLong              // 11115 上下文超限 → 请求级错误，不罚号不轮转，透传原文
-	ErrWafBlock                   // 403 + 非业务信封（WAF 拦截页/空体）→ 账号软冷却
-	ErrAccountFault               // 账号级授权/配额故障（11140/14017）→ 冷却轮换
-	ErrModelBlocked               // 11102 该后端无此模型 → (账号,模型) 负缓存避让
+	ErrNone           ErrKind = iota // 成功
+	ErrHardCredit                    // 余额/权益不足 → 长冷却
+	ErrSoftRate                      // 429 软限流 → 短冷却
+	ErrSessionDead                   // 登录态失效 → 禁用
+	ErrNotFound                      // 404 上游偶发 → 短冷却不累计 errCount
+	ErrServer                        // 5xx 上游故障
+	ErrClient                        // 其他 4xx / 业务错误
+	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，透传原文
+	ErrPromptTooLong                 // 11115 上下文超限 → 请求级错误，不罚号不轮转，透传原文
+	ErrWafBlock                      // 403 + 非业务信封（WAF 拦截页/空体）→ 账号软冷却
+	ErrAccountFault                  // 账号级授权/配额故障（11140/14017）→ 冷却轮换
+	ErrModelBlocked                  // 11102 该后端无此模型 → (账号,模型) 负缓存避让
+	ErrPassthrough                   // 请求级拒绝（形态/地域/身体不被接受）→ 原文透传，不罚账号不轮转
 )
 
 func (k ErrKind) String() string {
@@ -69,6 +71,8 @@ func (k ErrKind) String() string {
 		return "account_fault"
 	case ErrModelBlocked:
 		return "model_blocked"
+	case ErrPassthrough:
+		return "passthrough"
 	default:
 		return "none"
 	}
@@ -157,7 +161,9 @@ type Upstream interface {
 	// Stream/Aggregate 的 model 参数是「客户端请求的原始模型名」（含 channel/ 前缀），
 	// 由调用方显式传入而非渠道内部记忆状态——后者在多账号并发下会串号。
 	// 实现方应在输出的 model 字段回填该值（上游常返回 "auto" 或裸名）。
-	Stream(w http.ResponseWriter, r io.Reader, model string) error
+	// Stream 返回值为末帧捕获的 usage（OpenAI 形状，pt/ct/total），供 handler 记 token 流水；
+	// 上游未返回 usage 时为 nil（调用方记 0 token + 请求数）。
+	Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error)
 	Aggregate(r io.Reader, model string) (map[string]any, error)
 }
 
@@ -171,6 +177,9 @@ type ResourceItem struct {
 	// ExpireAt 该条目到期时刻（RFC3339，UTC+8 墙钟）。空串表示上游未下发到期时间，
 	// 前端据此隐藏「有效期」列——不得用零值时间冒充「永不过期」。
 	ExpireAt string `json:"expire_at,omitempty"`
+	// Key 条目稳定标识（上游提供的 ID，如 TraeWork entitlement_id），
+	// 供 ledger 差分对账用；渠道无 ID 时留空，差分退回 Name 作伪键。
+	Key string `json:"key,omitempty"`
 	// Usable 标记该条目是否属于本工具可消耗的额度池。
 	// TraeWork 存在按 available_endpoint 划分的专用池（ep=1，官方客户端专用），
 	// 本工具走的是 ep=0；这类额度对用户是「看得见用不了」，需在界面上分开统计。

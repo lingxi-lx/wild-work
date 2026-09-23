@@ -14,7 +14,7 @@
 ## 1. 代码地图
 
 ```
-cmd/wild-work/main.go         # daemon 入口：装配三渠道 → 启动 HTTP → 调度器 → 托盘/无头
+cmd/wild-work/main.go         # daemon 入口：装配各渠道 Runtime → 启动 HTTP → 调度器 → 托盘/无头
 cmd/wild-work/web/             # 纯静态 Web UI（index.html / app.js / style.css）
 cmd/genicon/                   # 图标生成（纯 Go）
 internal/
@@ -28,6 +28,8 @@ internal/
 ├── qoder/                      # 旧 Qoder(QoderWork) 上游：已下线，路由保留
 ├── qodercn/                    # QoderCN 上游：qoder2api 参数形态（cosyVersion 1.0.10 / 双路径签到）
 ├── qodercom/                   # QoderCOM 国际版上游：三域分离（openapi/api1/api2.qoder.sh）
+├── qwenwork/                   # 千问办公上游（gateway.qwenwork.cn）
+├── oczen/                      # OpenCodeZen 匿名免费通道：无账号（Bearer public）+ 三道闸门构造
 ├── login/                      # WorkBuddy OAuth 登录编排
 ├── login_trae/                 # TraeWork 登录编排（PKCE + 回调轮询）
 ├── login_qoder/                # 旧 Qoder 登录编排（已下线）
@@ -41,7 +43,8 @@ internal/
 
 ## 2. 关键不变量（改了会出事）
 
-1. **`PrepareBody` 三改写勿动**：强制 `stream=true`、`tool_choice` 归一化、`role=developer→system`——三渠道各自的 `PrepareBody` 均需保持。
+1. **`PrepareBody` 三改写勿动**：强制 `stream=true`、`tool_choice` 归一化、`role=developer→system`——各渠道各自的 `PrepareBody` 均需保持。
+   例外：`oczen` 的强制 `stream=true` 是上游闸门要求（非兼容便利），且 `tool_choice` 只允许在「客户端未带 tools」时置 `none`，否则会破坏客户端的工具调用。
 2. **日志/面板零 token**：任何输出不得含 access token / refresh token / GitHub token。
 3. **auth 文件格式**：嵌套形 `{auth:{...},account:{...}}`，`internal/auth.Parse` 与各 login.SaveAuth 写入必须一致。新增字段必须同时加入 Parse 和 SaveAtomic。
 4. **config.listen 兼容**：新对象格式 `{"host","port"}` + 旧字符串格式 `":7863"` 都要能解析。
@@ -113,13 +116,40 @@ CN 凭据在国际端点 401（双向隔离），两渠道凭据文件前缀 `qo
 
 思考开关：`buildAgentBody` 的 `is_reasoning` 参数由 `reasoning_effort`/`thinking` 请求参数动态控制。
 
+### OpenCodeZen（oczen，匿名免费）
+
+| 用途 | 端点 | 鉴权 |
+|------|------|------|
+| 聊天 | `POST https://opencode.ai/zen/v1/chat/completions` | `Bearer public`（字面量，匿名） |
+| 模型列表 | `GET https://opencode.ai/zen/v1/models` | 同上 |
+
+**无刷新/无余额/无签到**：匿名凭证是常量，`RefreshToken` 为空实现，`UserResource*` 恒 0，
+`DailyCheckin` 返回「无签到活动」（调度器配置为 `CheckinMinutes/KeepaliveHours` 均 nil，不会调用）。
+
+三道闸门（缺一即 403 FreeTierError，详见渠道备忘）：
+1. `x-opencode-session` 必须是 `ses_<12位小写hex><14位Base62>`（由对话首轮哈希稳定派生）；
+2. 请求体必须 `stream:true` 且 `tools` 内同含 `bash`/`read` function（缺则注入桩工具；
+   客户端无工具时同时置 `tool_choice:"none"`，有工具时保留其 `tool_choice`）；
+3. 伪装头齐套：`User-Agent: opencode/1.18.x`、`x-opencode-client: cli`、
+   `x-session-affinity`/`X-Session-Id`（同会话值）、`x-opencode-request`、`x-opencode-project`。
+
+模型暴露：只保留 ID 含 `free` 或恰为 `big-pickle` 的模型（地域受限的也保留）；
+上游不可达时回静态清单（`internal/oczen/free.go`）。定价恒为 `Rate=0, Explicit=true`。
+model 字段回填：`Aggregate` 直接改字段；`Stream` 用 `modelRewriter` 逐行替换。
+
 ## 4. 渠道扩展点
 
-新增渠道只需三步：
+新增渠道一般只需三步：
 
 1. 新建 `internal/<channel>/` 包，实现 `provider.Upstream` 接口
 2. 新建 `internal/login_<channel>/` 包，实现登录编排
 3. 在 `cmd/wild-work/main.go` 装配处注册 Runtime
+
+> **例外：无账号渠道（oczen）**不需要第 2 步，也不需要 `internal/auth` 的 `Load<X>Dir()`：
+> 虚拟账号由 `oczen.AnonymousAuth()` 在 `main` 装配时注入 pool（`FilePath` 为空），
+> 且 **不得** 纳入 `app.reloadAccounts`——`pool.SyncToDir` 会把「目录里扫不到」的账号剔除。
+> 其 `Classify` 只能对 429 返回冷却类错误，其余 4xx 一律 `ErrPassthrough`（单账号不可轮换）。
+> 详见 `docs/opencodezen渠道接入备忘.md`。
 
 `provider.Upstream` 接口：
 ```go

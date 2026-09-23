@@ -1,6 +1,6 @@
 # wild-work
 
-> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、QoderCN、QoderCOM（国际版）、千问办公的多个账号聚合成一个 OpenAI 兼容 API，双击启动，浏览器管理。
+> 多渠道账号聚合桌面工具——把 WorkBuddy(CodeBuddy) 国内版/国际版、TraeWork、QoderCN、QoderCOM（国际版）、千问办公的多个账号聚合成一个 OpenAI 兼容 API，并额外提供**无需账号**的 OpenCodeZen 匿名免费通道，双击启动，浏览器管理。
 
 [![GitHub](https://img.shields.io/badge/GitHub-rockswang%2Fworkbuddy--wild-blue)](https://github.com/rockswang/workbuddy-wild)
 
@@ -10,7 +10,8 @@
 - **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句，防止上游 11128 内容拦截
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
 - **错误分类精细化**：区分「请求问题」与「账号问题」——内容拦截/上下文超限不罚号，限流/风控/账号故障分级冷却，429 不再误判余额耗尽
-- **六渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + QoderCN + QoderCOM（国际版） + 千问办公，模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **七渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + QoderCN + QoderCOM（国际版） + 千问办公 + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **匿名免费通道**（OpenCodeZen）：内置 `public` 凭证即可调用 Zen 上的免费模型（含 `big-pickle`），无需注册/登录；面板固定一个 `[OpenCodeZen] 匿名` 条目（不可增删停用、无签到、积分显示「不适用」）
 - **自动签到**：每日定时签到领额度，token 保活，冷却状态机
 - **自动领日活奖励**（WorkBuddy 国际版）：定时自动用免费模型对话保活，自动领取每日活跃奖励，无需手动签到
 - **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、模型列表和费率、API 配置
@@ -23,6 +24,32 @@
 
 本项目最初算法来源于 [Sliverkiss/](https://github.com/Sliverkiss/) 大佬的 xxx2api 系列项目，本项目针对多渠道进行了聚合，针对 Windows 环境进行了适配，降低了使用门槛，并提供跨平台 Web 管理界面。
 
+### 声明
+
+**本项目只是各上游渠道的集成与聚合，本身不涉及任何逆向分析和破解工作。**
+
+即：本仓库不产出、不包含、不分发任何协议逆向研究成果。各渠道的接口参数、签名算法、风控指纹等底层知识，全部来自社区其他开源项目的公开成果；本项目所做的是**在既有公开成果之上做多渠道路由、账号池调度、协议适配与界面封装**，并提供跨平台、低门槛的使用形态。所有逆向相关的功劳与风险归于下述各上游项目作者。
+
+### 致谢
+
+感谢以下开源项目及其作者。它们分别完成了各渠道的接口逆向与协议封装，是本项目各渠道能够落地的前提：
+
+| 项目 | 贡献 |
+|------|------|
+| [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) | WorkBuddy(CodeBuddy) 国内版接口逆向，本项目最初的算法来源 |
+| [Sliverkiss/qoderwork2api](https://github.com/Sliverkiss/qoderwork2api) | QoderWork 接口逆向，Qoder 渠道参考 |
+| [wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api) | 千问办公渠道逆向参考 |
+| [wpy030414/xrl-router-plugin-qwenwork](https://github.com/wpy030414/xrl-router-plugin-qwenwork) | 千问办公渠道逆向参考 |
+| [iceloon/dsh-workbuddyai-connect](https://github.com/iceloon/dsh-workbuddyai-connect) | WorkBuddy 国际版接口逆向，国际版渠道主要参考 |
+| [corrinehu/dsh-workbuddy-connect](https://github.com/corrinehu/dsh-workbuddy-connect) | WorkBuddy 渠道架构参考（MIT） |
+| [Zhengyuuuui/qoder2api](https://github.com/Zhengyuuuui/qoder2api) | Qoder 渠道端点与逻辑比对参考 |
+| [icebears111/qoderwork2api](https://github.com/icebears111/qoderwork2api) | Qoder 渠道端点与逻辑比对参考 |
+| [zhangdailin/Orchids-2api](https://github.com/zhangdailin/Orchids-2api) | Qoder 渠道端点与逻辑比对参考 |
+| [287775856/workbuddy2api-gui](https://github.com/287775856/workbuddy2api-gui) | 同类项目账号池状态可视化面板参考 |
+| [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) | 同类项目账号管理工具参考 |
+
+> 若上述项目作者认为本项目的引用方式不当，请提 issue 联系，我们会立即调整或移除相关内容。
+
 ## 使用方式
 
 ### Windows
@@ -30,7 +57,8 @@
 1. 从 [Releases](https://github.com/rockswang/workbuddy-wild/releases) 下载 `wild-work.exe`
 2. 放到任意目录，双击启动
 3. 右下角出现 W 图标，**双击托盘图标** → 浏览器打开 Web 管理面板
-4. 在面板中点击「+ WorkBuddy」/「+ WorkBuddy 国际版」/「+ TraeWork」/「+ Qoder」/「+ 千问办公」添加账号
+4. 在面板中点击「+ WorkBuddyCN」/「+ WorkBuddyAI」/「+ TraeWork」/「+ QoderCN」/「+ QoderCOM」/「+ 千问办公」添加账号
+   （OpenCodeZen 无需添加账号，启动即已就绪）
 5. 根据下方配置说明接入你的 AI 客户端
 
 ### 托盘菜单
@@ -153,7 +181,25 @@ Base URL: http://127.0.0.1:7863/v1
 API Key:  WildWorkAPI
 ```
 
-模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
+模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
+
+#### OpenCodeZen 匿名免费模型（`oczen/*`）
+
+无需任何账号或登录，直接可用（免费清单由上游动态下发，随时增删）：
+
+```bash
+curl http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer WildWorkAPI" -H "Content-Type: application/json" \
+  -d '{"model":"oczen/mimo-v2.6-flash-free","messages":[{"role":"user","content":"你好"}]}'
+```
+
+- 常见可用：`oczen/big-pickle`、`oczen/mimo-v2.6-flash-free`、`oczen/mimo-v2.5-free`、
+  `oczen/nemotron-3-ultra-free`、`oczen/nemotron-3.5-lightning-free`、`oczen/ling-3.0-flash-fin-free`；
+  完整清单见 `/v1/models` 中 `oczen/` 开头的条目。
+- 部分免费模型有**地域限制**（如 `muse-spark-*-contributor-free` 在国内直连返回 403 RegionError）：
+  列表仍会列出，自备代理即可使用。
+- 免费额度/限流由上游 OpenCode Zen 控制，本工具不做额外限制；上游未见请求数配额，
+  但高并发时延会上升。
 
 ### 4. 三种接口协议
 
@@ -221,11 +267,21 @@ export ANTHROPIC_MODEL="traework/glm-5.2"
 
 - **添加账号**：点击渠道按钮 → 确认对话框 → 浏览器窗口登录 → 自动完成
 - **账号管理**：卡片显示积分、签到状态（WorkBuddy 国际版显示「自动领日活奖励」）；图标按钮操作（签到 ✓ / 刷新 ↻ / 停用 ⏸ / 删除 ✕）
+  - **修改显示名**：点击卡片上的账号名即可修改，用于给账号起好认的别名
+  - 账号按固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
   - 积分显示为「可用积分」；若该账号还有本工具用不了的额度（如 TraeWork 官方客户端专用池），会追加显示 `/ N 不可用`
 - **积分明细**：鼠标悬停积分数字显示套餐明细（含有效期与可用/不可用小计），条目多时用底部 `‹ ›` 翻页
 - **刷新积分**：面板顶部按钮，批量刷新全部账号余额
 - **模型列表和费率**：点击「刷新」从上游拉取最新模型定价；上游未返回定价的模型显示 `unknown`，免费模型高亮为 `Free`
-- **API 配置**：点击页面顶部 API 地址或 Key 修改
+- **设置（统一配置入口）**：点击顶栏右侧 ⚙ 齿轮按钮，包含：
+  - *接口与鉴权*：API 监听地址（`127.0.0.1` / `0.0.0.0` / 自定义 + 端口）、API-Key
+  - *自动签到与开机自启*：签到时间多组增删、开机自启开关
+  - *模型路由*：默认渠道、封顶 tokens、CC/Codex 客户端模型名映射表（`claude-* = workbuddy/glm-5.2` 形式，支持通配）
+  - *渠道上游代理*：给单个渠道的上游请求单独配置代理（`http://` / `https://` / `socks5://`），留空直连；
+    典型用途：OpenCodeZen 的区域限制模型需经代理访问。还可为 OpenCodeZen 填入自定义 API key（`sk-…`，
+    留空用匿名凭证 `public`；自定义 key 有独立配额不受匿名限流影响，且可调用付费模型——需账户余额）
+
+> 顶栏的 API 地址 / API-Key 文本框点击复制；所有配置修改统一走 ⚙ 设置弹层。
 
 ## 常见问题
 
@@ -262,6 +318,25 @@ TraeWork 的额度分两个池，由上游 `available_endpoint` 字段区分：
 
 ### 5. WorkBuddy 国际版登录后积分显示为0，刷新积分报错
 注册 WorkBuddy 国际版新账号时，需要选择地区后奖励积分才发放。
+
+## ⚠️ 风险警告与免责声明
+
+**在使用本工具前，请务必阅读并理解以下内容。下载、运行或继续使用本工具即表示你已阅读、理解并同意承担全部风险与责任。**
+
+### 风险警告
+
+1. **逆向工程风险**：本工具基于对上游平台（WorkBuddy/CodeBuddy、TraeWork、Qoder、千问办公、OpenCode 等）**未公开接口的逆向工程**实现，非官方支持、无任何授权。上游随时可能调整接口、加密方式或风控策略，导致本工具**部分或全部功能立即失效**，作者不承诺修复时效。
+2. **封号风险**：使用本工具的请求特征与官方客户端存在差异，**可能违反上游平台的服务条款**，存在账号被**限制功能、降低额度、暂时或永久封禁**的风险。请自行评估后果，**强烈建议使用小号或可承受损失的账号接入，切勿将主力账号用于本工具**。
+3. **网络暴露风险**：面板监听 `0.0.0.0` 时，局域网内任何设备均可访问你的 API 与账号管理界面（含登录入口），请确认网络环境可信并自行承担暴露风险。
+4. **数据安全风险**：账号凭证（access/refresh token）以明文 JSON 保存在本地 `auths/` 目录，请妥善保管该目录，避免泄露。
+
+### 免责声明
+
+1. 本工具仅供**个人学习、技术研究与测试**用途，严禁用于商业用途、大规模滥用或任何违反法律法规及上游平台服务条款的场景。
+2. 本软件按"**现状**"（AS IS）提供，**不提供任何明示或默示的保证**。作者不对使用本软件造成的任何直接或间接损失承担责任，包括但不限于：账号被封禁、积分/额度损失、数据丢失、商业纠纷、法律纠纷等。
+3. 使用者应**自行承担**因使用本工具产生的一切风险与后果；若不同意上述条款，请立即停止使用并删除本软件。
+4. 本工具与上游各平台及其运营方**无任何关联与合作**；相关商标与品牌权利归其各自所有者所有。
+5. 如本工具的使用对上游平台造成影响或平台方提出异议，作者将配合处理；本项目的存在不代表对任何规避行为的价值判断。
 
 ## 交流群
 

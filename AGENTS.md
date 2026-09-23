@@ -35,12 +35,15 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R7 | **移除 wails / WebView2 全部依赖** | 省内存与运行时；平台能力封装进 `internal/platform`（build tag 拆分） |
 | R8 | daemon 单进程：一个 `http.Server` 同时服务 OpenAI 端点 + 管理 API + 静态 UI | 沿用 server 现有 ServeMux 扩展 |
 | R9 | 核心业务（pool/scheduler/upstream/traework/server/login/config/auth/provider）**整体复用**，格式零迁移 | config.json / auths/ / data/state.json 兼容旧版；旧 state.json 自动迁移到 state-workbuddy.json |
-| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) 六渠道；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
+| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + OpenCodeZen(oczen 匿名) 七渠道；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
 | R11 | Windows 产物在 WSL 交叉编译（`GOOS=windows CGO_ENABLED=0`，已验证可行）；macOS 产物走 GitHub Actions macos-latest（cgo 必需） | WSL 无法编 darwin cgo；CI 增加 darwin job |
 | R12 | **无桌面 Linux 使用 `--no-tray` 参数** | 无参启动在无 DBus 环境托盘 panic 直接 exit 并提示；`--no-tray` 跳过托盘打印信息阻塞等待 Ctrl+C |
 | R13 | **三接口兼容采用两层结构：内层 handler 不动，新增 `internal/gateway` 边缘层**，经 **in-process 调用**（`io.Pipe` + ResponseWriter 形状）复用内层 | 代码量比内联重构多 20%，但改动面小一个数量级（主链路仅 2 处调用点 + 1 个访问器），回归风险低、可脱离 pool 单测。**不得用 HTTP 自环**（`0.0.0.0` 监听不可作目标、鉴权双份、启动竞态） |
 | R14 | **`Stream`/`Aggregate` 的 model 由调用方显式传入**，渠道不得用实例字段记忆「上次请求的模型名」 | 旧实现 qoder 用全局 `lastModel`，多账号并发会串号；traework 恒为空串。详见 `docs/三接口兼容改造备忘.md` §3 |
 | R15 | **Responses 的 `function_call` 必须是独立 output item**（带 `call_id`），Anthropic 的 tool_use 参数必须走 `input_json_delta` | 参考实现 `tokligence-gateway` 两处写法不合规范（塞进 `message.content`、start 里一次性给完整 input），Codex/Claude Code 会解析失败 |
+| R16 | **无账号渠道（oczen）不建 auth 文件、不进 `reloadAccounts`、不参与禁用/冷却惩罚** | 匿名凭证是常量 `public`；`SyncToDir` 会剔除磁盘上不存在的虚拟账号，故只在装配时注入一次。单账号 + 不可重登 ⇒ 任何账号级冷却都等于整渠道下线，故 4xx 一律走新增的 `ErrPassthrough`（原文透传、不计错不冷却），只有 429 才短冷却。详见 `docs/opencodezen渠道接入备忘.md` |
+| R17 | **用量/积分双流水分口径统计，不强关联、不折算** | `internal/ledger` 双 JSONL（usage 按渠道×模型 / credit 按账号 earn·spend·expire）；写入仅 append 缓冲句柄（30s AutoFlush），读取仅在 UI 请求 `/api/usage` 时按月分段扫描聚合，常驻内存 ≈0。`Upstream.Stream` 返回末帧 usage（R14 同款显式传参哲学）。首见账号只记一条「存量额度」baseline，不逐条展开。详见 `docs/用量积分流水记账备忘.md` |
+| R18 | **临期阈值可配（默认 24h，下限 24h）** | `config.schedule.expiring_threshold_hours`，normalize 钳下限（日期粒度到期判定低于一天无意义）；scheduler 与 app.creditTotals 同源取 `cfg.ExpiringThresholdDur` |
 
 ## 2. 架构选型（依据）
 
@@ -76,7 +79,7 @@ wild-work
 | 顶部栏 | 品牌名/版本号、API 地址（点击弹窗配置）、API-Key（点击弹窗修改）、帮助/关于 |
 | 账号管理 | 双列卡片网格，账号名/UID/积分/签到状态，图标按钮操作（签到/刷新/停用/删除） |
 | 自动签到 | 签到时间（HH:MM 多组）+ 开机自启开关（左右布局） |
-| 渠道费率 | 六渠道模型定价表（按渠道分组，合并单元格），刷新按钮 |
+| 渠道费率 | 七渠道模型定价表（按渠道分组，合并单元格），刷新按钮 |
 
 管理 API（REST，均挂 `/api/*`）：
 
@@ -101,13 +104,15 @@ GET  /api/logs                     # 最近 300 行日志
 POST /api/quit                     # 退出程序
 ```
 
-## 5. 渠道（已实现 WorkBuddyCN + WorkBuddyAI 国际版 + TraeWork + QoderCN + QoderCOM 国际版 + 千问办公；旧 Qoder 已下线）
+## 5. 渠道（已实现 WorkBuddyCN + WorkBuddyAI 国际版 + TraeWork + QoderCN + QoderCOM 国际版 + 千问办公 + OpenCodeZen 匿名；旧 Qoder 已下线）
 
 1. 新建 `internal/<channel>/` 包，实现 `provider.Upstream` 接口
 2. `internal/auth` 增加对应 `Load<Channel>Dir()`（文件名前缀 `<channel>-*.json`；
    **glob 边界**：`qoder*.json` 会吞掉 `qodercn-`/`qodercom-` 前缀，LoadQoderDir 必须显式排除）
 3. 装配处注册 `server.Runtime{Kind, Pool, Upstream, StaticModels}` + `app.Runtime{..., Scheduler}`
 4. 前端渠道选择器加一项；`internal/login_<channel>` 实现登录编排（如需）
+   > **无账号渠道（oczen）跳过第 2、4 步**：不建 auth 文件与加载器，虚拟账号由 `main` 装配时注入 pool，
+   > 且 `app.reloadAccounts` 不得纳入（否则 `SyncToDir` 会把它剔除）。
 
 > provider.Kind 即模型名前缀；server 按 `channel/<model>` 前缀路由，无需改接口。
 > **QoderCN（`qodercn/*`）**：qoder2api 参数形态（cosyVersion 1.0.10、18 头含 cosy-scene 族、
@@ -118,6 +123,10 @@ POST /api/quit                     # 退出程序
 > **旧 Qoder（`qoder/*`，QoderWork）已从界面下线**：代码与路由保留，存量账号仍可用；不新增功能，后续可移除。
 > WorkBuddyAI 国际版：`DailyCheckin` 实现为「免费模型对话保活 + 签到探测」（对用户透明，无前端界面）；
 > token 有效期 365 天，故 KeepaliveHours 设为 nil。详见 `docs/workbuddy国际版渠道接入备忘.md`。
+> **OpenCodeZen（`oczen/*`，匿名免费）**：凭证固定字面量 `public`，无账号/无签到/无积分；
+> 免费档有三道闸门（规范 `ses_<12hex><14Base62>` 会话头 + `stream:true` 且 tools 含 `bash`/`read` +
+> OpenCode CLI 伪装头），缺一即 403 FreeTierError；面板固定一项「[OpenCodeZen] 匿名」、积分显示「不适用」，
+> 不可增删停用。详见 `docs/opencodezen渠道接入备忘.md`。
 
 ## 6. 关键不变量（改动前必读）
 
@@ -158,6 +167,12 @@ POST /api/quit                     # 退出程序
     （`app.refreshIfSessionDead`，scheduler 的 checkin 路径同理）。
 20. **凡是调 `Upstream.RefreshToken` 的地方必须紧跟 `SaveAtomic`**：refresh token 会轮换，不落盘 = 下次启动用旧 refresh token，
     重回上一条的死锁（`RefreshPricing` 曾漏，已补）。
+21. **匿名渠道的虚拟账号不得进入任何「能把它弄没」的路径**：`reloadAccounts` 不纳入（`SyncToDir` 会剔除），
+    启动时 `SetDisabled(uid,false)` 兜底自愈；`RemoveAccount`/`DisableAccount` 对 `provider.Oczen` 硬拒（后端拒 + 前端无入口）。
+    其 `Auth.ExpiresAt` 必须为远期值（不得为 0），否则 `NeedsRefresh` 恒真 → 反复 `RefreshToken` + 冷却。
+22. **无账号渠道的错误分类只能依赖 429**：单账号且不可重登 ⇒ 任何 4xx 都不应惩罚账号（否则整渠道下线），
+    故 `oczen.Classify` 对其它 4xx 返回 `ErrPassthrough`（server 侧与 `ErrContentBlocked` 同分支：原文透传、不计错不冷却）。
+    **严禁**把 401/403 归为 `ErrSessionDead`（会 `pool.Disable` 永久禁用且无法人工恢复）。
 
 ## 7. 平台能力差异表（internal/platform）
 
@@ -212,7 +227,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 - [README.md](README.md) — 用户文档
 - [DEVELOPMENT.md](DEVELOPMENT.md) — 开发者文档（面向 AI Agent）
 - [HANDOFF.md](HANDOFF.md) — 交接文档（历史记录）
-- [docs/workbuddy国际版逆向分析备忘.md](docs/workbuddy国际版逆向分析备忘.md) — 国际版接口逆向（含抓包证据、模型倍率全表、凭据通用性验证）
-- [docs/workbuddy国际版渠道接入备忘.md](docs/workbuddy国际版渠道接入备忘.md) — 国际版渠道接入方案（接口规格、代码映射、调度设计、实施 Checklist）
-- [docs/upstream-reverse-engineering.md](docs/upstream-reverse-engineering.md) — 各上游渠道 API 逆向记录
 - [docs/三接口兼容改造备忘.md](docs/三接口兼容改造备忘.md) — 三接口（Chat/Responses/Anthropic）兼容层架构决策、实施记录、验证清单、已知限制
+- [docs/用量积分流水记账备忘.md](docs/用量积分流水记账备忘.md) — 双流水统计（token/积分）架构、差分算法、实测验证、已知限制（R17）
+
+> **docs/ 采用白名单制**：`.gitignore` 中 `docs/*` 默认忽略全部文档，仅 `!docs/<文件名>` 显式反选的才入库。
+> 逆向分析类文档一律**只保留本地、不入库**。新增需要入库的文档时，追加一行 `!docs/<文件名>`。

@@ -199,32 +199,46 @@ function render() {
   renderTimes();
 }
 
+// renderTopbar 顶栏 API 地址渲染：
+// - 监听 127.0.0.1/localhost → 原样显示；
+// - 监听 0.0.0.0/::/空（所有网卡）→ 显示局域网 IP（lan_ip），客户端可跨机接入；
+//   取不到局域网 IP 时兑底 127.0.0.1；
+// - 其他自定义地址 → 原样显示。
+// 此前 0.0.0.0 被硬换成 127.0.0.1，局域网客户端复制到的是本机环回地址，无法跨机接入。
 function renderTopbar() {
   $("ver").textContent = "v" + state.version;
   $("serverLine").textContent = state.running ? "服务运行中" : "服务未启动";
   $("aboutVer").textContent = state.version;
 
-  const host = (state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::")
-    ? "127.0.0.1" : state.listen_host;
+  const wildcard = state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::";
+  const host = wildcard ? (state.lan_ip || "127.0.0.1")
+    : (state.listen_host === "localhost" ? "127.0.0.1" : state.listen_host);
   const apiURL = `http://${host}:${state.listen_port}/v1`;
   $("apiAddr").querySelector(".val").textContent = apiURL;
+  // 监听所有网卡时提示真实含义（避免误导为仅本机可用）
+  $("apiAddr").title = wildcard
+    ? `监听 0.0.0.0（所有网卡），局域网可用；点击复制`
+    : "点击复制地址";
 
   const key = state.api_key;
   $("apiKeyDisplay").querySelector(".val").textContent = key === "" ? "（无鉴权）" : key;
 }
 
 // 渠道显示名与 CSS 短类名（后端 group / 费率 channel 均为 provider.Kind）。
-const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公" };
-const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork" };
+const CH_LABEL = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", traecode: "TraeCode", qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", oczen: "OpenCodeZen" };
+const CH_CLASS = { workbuddy: "wb", workbuddyai: "wbai", traework: "trae", traecode: "traecode", qoder: "qoder", qodercn: "qodercn", qodercom: "qodercom", qwenwork: "qwenwork", oczen: "oczen" };
 const chLabel = (k) => CH_LABEL[k] || "WorkBuddy";
 const chClass = (k) => CH_CLASS[k] || "wb";
 // 不支持显式签到（手动按钮）的渠道：
-// WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；千问办公无签到活动。
-const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork"]);
+// WorkBuddy 国际版不提供手动签到，而是自动对话保活领日活奖励；
+// 千问办公无签到活动；OpenCodeZen 匿名通道无账号概念（也无积分）。
+const NO_EXPLICIT_CHECKIN = new Set(["workbuddyai", "qwenwork", "oczen"]);
 const noExplicitCheckin = (g) => NO_EXPLICIT_CHECKIN.has(g);
 // 无手动签到渠道的状态文案：国际版是「自动领日活奖励」，千问办公为「无签到」。
-const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励" };
+const NO_CHECKIN_TAG = { workbuddyai: "自动领日活奖励", oczen: "不支持" };
 const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
+// 无积分概念的渠道（匿名通道）：积分区域显示「不适用」，并隐藏刷新积分/明细入口。
+const NO_CREDITS = new Set(["oczen"]);
 
 // creditsText 账号卡片的积分文案。
 // 拆成「可用 / 不可用 / 临期」三个数字：渠道（如 TraeWork）会下发官方客户端专用的
@@ -234,6 +248,9 @@ const noCheckinText = (g) => NO_CHECKIN_TAG[g] || "无签到";
 // 旧版本 state 文件（v2.2.0 及之前，无 unusable 字段）读入后 credits_stale=true，
 // 此时不把旧值当真值，改显示「待刷新」；自动刷新首刷成功后即变回真实拆分。
 function creditsText(a) {
+  if (a.credits_na) {
+    return `<span class="credit-na" title="匿名通道无积分概念">不适用</span>`;
+  }
   if (a.credits_stale) {
     return `<span class="credit-stale" title="余额口径已过期（旧版本状态文件），正在自动刷新…">待刷新</span>`;
   }
@@ -276,23 +293,34 @@ function renderAccounts() {
       ? `<span class="icon-op off" title="${esc(noCheckinTitle)}" onclick="return false">✓</span>`
       : `<span class="icon-op" title="签到" onclick="checkin('${a.uid}')">✓</span>`;
 
+    // 匿名渠道（无积分/无签到）：只保留「不可操作」的静态指示，
+    // 不给刷新积分/停用/删除入口——后端也会硬拒，避免用户白点一次。
+    const noCredits = NO_CREDITS.has(a.group);
+    const ops = noCredits
+      ? `<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
+      : `${checkinBtn}
+          <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
+          <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
+          <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
+    // 显示名：点击直接弹出改名框（匿名渠道不可改，降级为普通文本）
+    const nameHtml = noCredits
+      ? `<span class="acct-name">${esc(a.nickname || shortUid(a.uid))}</span>`
+      : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`;
+
     return `
     <div class="acct-card${disabledClass}">
       <div class="acct-top">
         <div>
           <span class="badge ${group}">${groupName}</span>
-          <span class="acct-name">${esc(a.nickname || shortUid(a.uid))}</span>
+          ${nameHtml}
         </div>
         <div class="acct-ops">
-          ${checkinBtn}
-          <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
-          <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
-          <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>
+          ${ops}
         </div>
       </div>
       <div class="acct-uid">UID: ${esc(shortUid(a.uid))}</div>
       <div class="acct-mid">
-        <div class="acct-credits" onmouseenter="showCreditDetail(event,'${a.uid}')" onmouseleave="hideCreditDetail()">${creditsText(a)}</div>
+        <div class="acct-credits"${noCredits ? "" : ` onmouseenter="showCreditDetail(event,'${a.uid}')" onmouseleave="hideCreditDetail()"`}>${creditsText(a)}</div>
         <div class="acct-checkin">${checkinTag}</div>
       </div>
     </div>`;
@@ -557,7 +585,7 @@ function stopLoginPoll() {
   if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
 }
 
-// ---------- 签到时间 ----------
+// ---------- 签到时间（设置弹层内编辑；单次变更立即保存） ----------
 function delTime(t) {
   const times = (state.checkin_times || []).filter((x) => x !== t);
   saveTimes(times);
@@ -579,7 +607,7 @@ async function saveTimes(times) {
   } catch (e) { toast(e.message); }
 }
 
-// ---------- 开机自启 ----------
+// ---------- 开机自启（设置弹层内，切换立即保存） ----------
 async function toggleAutostart() {
   try {
     await api("/api/config/autostart", { on: $("chkAutostart").checked });
@@ -587,8 +615,26 @@ async function toggleAutostart() {
   } catch (e) { toast(e.message); loadState(); }
 }
 
-// ---------- API 配置弹层 ----------
-function openApiConfig() {
+// ---------- 设置弹层（统一配置：监听/API-Key/签到/自启/模型路由/渠道代理） ----------
+// PROXY_CHANNELS 渠道上游代理列表（顺序与面板渠道序一致；旧 qoder 已下线不提供代理配置）。
+const PROXY_CHANNELS = ["oczen", "workbuddy", "workbuddyai", "qodercn", "qodercom", "traework", "qwenwork"];
+const PROXY_HINT = { workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", oczen: "OpenCodeZen" };
+
+// renderProxyList 按当前 state.proxies 渲染每渠道一个输入行。
+function renderProxyList() {
+  const proxies = state.proxies || {};
+  $("proxyList").innerHTML = PROXY_CHANNELS.map((ch) => {
+    const val = proxies[ch] || "";
+    return `<div class="row proxy-row">
+      <label class="lbl wide" title="${esc(PROXY_HINT[ch] || ch)}">${esc(PROXY_HINT[ch] || ch)}</label>
+      <input class="input grow proxy-input" data-ch="${ch}" value="${esc(val)}" spellcheck="false" placeholder="如 socks5://127.0.0.1:1080（留空直连）">
+    </div>`;
+  }).join("");
+  $("proxyErr").textContent = "";
+}
+
+function openSettings() {
+  // 监听
   $("inPort").value = state.listen_port;
   $("selHost").value = state.listen_host === "127.0.0.1" ? "127.0.0.1"
     : (state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::") ? "0.0.0.0"
@@ -599,6 +645,8 @@ function openApiConfig() {
   } else {
     $("customHostRow").classList.add("hidden");
   }
+  // API-Key
+  $("keyInput").value = state.api_key;
   // 模型路由
   const cc = state.compat || {};
   const channels = cc.channels || [];
@@ -613,11 +661,139 @@ function openApiConfig() {
   $("mapEditor").classList.add("hidden");
   $("mapErr").textContent = "";
   renderMapPresets(channels);
-  $("apiConfigOverlay").classList.remove("hidden");
+  // 渠道代理 + oczen 自定义 key
+  renderProxyList();
+  $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
+  $("oczenKeyInput").dataset.touched = "";
+  // 自动签到 + 开机自启
+  $("chkAutostart").checked = !!state.autostart;
+  $("settingsOverlay").classList.remove("hidden");
 }
 
-function closeApiConfig() {
-  $("apiConfigOverlay").classList.add("hidden");
+function closeSettings() {
+  $("settingsOverlay").classList.add("hidden");
+}
+
+// validateProxies 收集代理输入并做本地形态校验，返回 {proxies, err}。
+function validateProxies() {
+  const proxies = {};
+  for (const inp of document.querySelectorAll(".proxy-input")) {
+    const ch = inp.dataset.ch;
+    const v = inp.value.trim();
+    if (!v) continue;
+    let u;
+    try { u = new URL(v); } catch { return [null, `渠道 ${ch} 代理地址无效：${v}`]; }
+    if (!["http:", "https:", "socks5:"].includes(u.protocol)) {
+      return [null, `渠道 ${ch} 代理协议不支持（仅 http/https/socks5）：${v}`];
+    }
+    if (!u.hostname) return [null, `渠道 ${ch} 代理缺少主机名：${v}`];
+    proxies[ch] = v;
+  }
+  return [proxies, ""];
+}
+
+// testOczenKey 「测试」按钮：用输入框当前的候选 key（含脱敏值/空）调后端实测。
+// 后端逻辑：候选 key 临时写入渠道 client → big-pickle 发最小对话 → 200/429 均算通过
+// （200 = 配额正常；429 = 连通但匿名共享配额限流，属预期现象）；测试后恢复配置原值。
+async function testOczenKey() {
+  const btn = $("btnOczenTest");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "测试中…";
+  $("proxyErr").textContent = "";
+  try {
+    let k = $("oczenKeyInput").value.trim();
+    if (k.includes("…")) k = ""; // 脱敏形态 = 未改动，用当前配置值测
+    const r = await api("/api/config/oczen_test", { api_key: k });
+    if (r.ok) {
+      toast(r.status === 200 ? "✓ OpenCodeZen 凭证可用（200）" : "✓ 连通正常（429 匿名限流，属预期）");
+    } else {
+      const brief = (r.body || r.error || "").slice(0, 90).replace(/\s+/g, " ");
+      toast(`✗ 测试失败 HTTP ${r.status}：${brief}`);
+    }
+  } catch (e) {
+    toast("✗ 测试失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function saveSettings() {
+  // 1) 监听地址
+  let host = $("selHost").value;
+  if (host === "__custom__") host = $("inHost").value.trim() || "127.0.0.1";
+  const port = parseInt($("inPort").value, 10);
+  try {
+    await api("/api/config/listen", { host, port });
+  } catch (e) { toast(e.message); return; }
+
+  // 2) 代理（先本地校验，失败阻断保存）+ oczen key（仅在用户改动过时提交，避免把脱敏回显值存回）
+  const [proxies, perr] = validateProxies();
+  if (perr) { $("proxyErr").textContent = perr; toast(perr); return; }
+  const body = { proxies };
+  const kIn = $("oczenKeyInput");
+  if (kIn.dataset.touched === "1") {
+    let k = kIn.value.trim();
+    // 值仍是脱敏形态（含 …）则视为未修改，保持服务端现值
+    if (k && k.includes("…")) k = undefined;
+    if (k !== undefined) body.oczen_api_key = k; // undefined 时不携带字段 = 不改动；空串 = 清除回匿名
+  }
+  try {
+    await api("/api/config/proxies", body);
+  } catch (e) { toast(e.message); return; }
+
+  // 3) 模型映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
+  let modelMap = state.compat?.model_map || {};
+  if (!$("mapEditor").classList.contains("hidden")) {
+    const [parsed, err] = parseMapText($("mapText").value);
+    if (err) { $("mapErr").textContent = err; toast(err); return; }
+    modelMap = parsed;
+  }
+  const defaultChannel = $("selCh").value;
+  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
+  try {
+    await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
+  } catch (e) { toast(e.message); return; }
+
+  // 4) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
+  try {
+    await api("/api/config/api_key", { key: $("keyInput").value.trim() });
+  } catch (e) { toast(e.message); return; }
+
+  toast("设置已保存");
+  closeSettings();
+  loadState();
+}
+
+// ---------- 显示名修改弹层 ----------
+let renameUid = null;
+
+function openRename(uid, currentName) {
+  if (uid === "oczen-anon") { toast("OpenCodeZen 匿名通道账号不可改名"); return; }
+  renameUid = uid;
+  $("rnUid").textContent = shortUid(uid);
+  $("rnInput").value = currentName === shortUid(uid) ? "" : (currentName || "");
+  $("renameOverlay").classList.remove("hidden");
+  $("rnInput").focus();
+}
+
+function closeRename() {
+  $("renameOverlay").classList.add("hidden");
+  renameUid = null;
+}
+
+async function saveRename() {
+  if (!renameUid) return;
+  const nickname = $("rnInput").value.trim();
+  if (!nickname) { toast("显示名不能为空"); return; }
+  try {
+    await api("/api/account/nickname", { uid: renameUid, nickname });
+    toast("显示名已更新");
+    closeRename();
+    loadState();
+  } catch (e) { toast(e.message); }
 }
 
 // ---------- 模型映射编辑器 ----------
@@ -633,6 +809,7 @@ const CHANNEL_PRESETS = {
   qodercn:     { label: "→ qodercn",                 items: ["gpt-* = qodercn/glm-5.3"] },
   qodercom:    { label: "→ qodercom",                items: ["gpt-* = qodercom/glm-5.3"] },
   qwenwork:    { label: "→ qwenwork",                items: ["gpt-* = qwenwork/flash", "claude-* = qwenwork/pro"] },
+  oczen:       { label: "→ oczen (匿名免费)",        items: ["claude-* = oczen/mimo-v2.6-flash-free", "gpt-* = oczen/big-pickle"] },
 };
 
 // renderMapPresets 按当前已接入渠道渲染缺省建议按钮。
@@ -687,53 +864,6 @@ function parseMapText(raw) {
     map[k] = v;
   }
   return [map, ""];
-}
-
-async function saveApiConfig() {
-  let host = $("selHost").value;
-  if (host === "__custom__") host = $("inHost").value.trim() || "127.0.0.1";
-  const port = parseInt($("inPort").value, 10);
-  try {
-    await api("/api/config/listen", { host, port });
-  } catch (e) { toast(e.message); return; }
-
-  // 映射：优先读编辑器；编辑器从未展开过则用原值（保证「只改监听/渠道不碰映射」）
-  let modelMap = state.compat?.model_map || {};
-  if (!$("mapEditor").classList.contains("hidden")) {
-    const [parsed, err] = parseMapText($("mapText").value);
-    if (err) { $("mapErr").textContent = err; toast(err); return; }
-    modelMap = parsed;
-  }
-
-  const defaultChannel = $("selCh").value;
-  const maxTokensCap = parseInt($("inMaxTok").value, 10) || 0;
-  try {
-    await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
-    toast("模型路由已更新");
-    closeApiConfig();
-    loadState();
-  } catch (e) { toast(e.message); }
-}
-
-// ---------- API Key 弹层 ----------
-function openApiKey() {
-  $("keyInput").value = state.api_key;
-  $("apiKeyOverlay").classList.remove("hidden");
-  $("keyInput").focus();
-}
-
-function closeApiKey() {
-  $("apiKeyOverlay").classList.add("hidden");
-}
-
-async function saveApiKey() {
-  const key = $("keyInput").value.trim();
-  try {
-    await api("/api/config/api_key", { key });
-    closeApiKey();
-    toast("API-Key 已更新");
-    loadState();
-  } catch (e) { toast(e.message); }
 }
 
 // ---------- 复制到剪贴板 ----------
@@ -796,9 +926,30 @@ function bind() {
     if (v === "（无鉴权）") { toast("当前未设置 API-Key"); return; }
     copyText(v, "API-Key");
   };
-  // 修改图标点击弹配置对话框（不触发复制）
-  document.querySelectorAll(".icon-edit")[0].onclick = openApiConfig;
-  document.querySelectorAll(".icon-edit")[1].onclick = openApiKey;
+  // 顶栏齿轮进入统一设置（点击地址/Key 文本仍为复制）
+  $("btnSettings").onclick = openSettings;
+
+  // 统一设置弹层
+  $("btnSettingsSave").onclick = saveSettings;
+  $("btnSettingsCancel").onclick = closeSettings;
+  $("btnCompatMap").onclick = toggleMapEditor;
+  $("selHost").onchange = () => {
+    $("customHostRow").classList.toggle("hidden", $("selHost").value !== "__custom__");
+  };
+  $("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveSettings(); });
+
+  // 显示名修改弹层
+  $("btnRenameSave").onclick = saveRename;
+  $("btnRenameCancel").onclick = closeRename;
+  $("rnInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveRename(); });
+  // oczen key 用户改动标记：避免把脱敏回显值误存回
+  $("oczenKeyInput").addEventListener("input", (e) => { e.target.dataset.touched = "1"; });
+  $("btnOczenTest").onclick = testOczenKey;
+
+  // 点击弹层空白处关闭
+  $("settingsOverlay").onclick = (e) => { if (e.target === $("settingsOverlay")) closeSettings(); };
+  $("renameOverlay").onclick = (e) => { if (e.target === $("renameOverlay")) closeRename(); };
+  $("helpOverlay").onclick = (e) => { if (e.target === $("helpOverlay")) closeHelp(); };
 
   $("btnHelp").onclick = openHelp;
   $("btnAbout").onclick = openAbout;
@@ -810,27 +961,14 @@ function bind() {
   $("btnLoginConfirmCancel").onclick = () => $("loginConfirmOverlay").classList.add("hidden");
   $("loginConfirmOverlay").onclick = (e) => { if (e.target === $("loginConfirmOverlay")) $("loginConfirmOverlay").classList.add("hidden"); };
 
-  $("btnApiSave").onclick = saveApiConfig;
-  $("btnApiCancel").onclick = closeApiConfig;
-  $("btnCompatMap").onclick = toggleMapEditor;
-  $("selHost").onchange = () => {
-    $("customHostRow").classList.toggle("hidden", $("selHost").value !== "__custom__");
-  };
-
-  $("btnKeySave").onclick = saveApiKey;
-  $("btnKeyCancel").onclick = closeApiKey;
-  $("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveApiKey(); });
-
-  // 点击弹层空白处关闭
-  $("apiConfigOverlay").onclick = (e) => { if (e.target === $("apiConfigOverlay")) closeApiConfig(); };
-  $("apiKeyOverlay").onclick = (e) => { if (e.target === $("apiKeyOverlay")) closeApiKey(); };
-  $("helpOverlay").onclick = (e) => { if (e.target === $("helpOverlay")) closeHelp(); };
   $("aboutOverlay").onclick = (e) => { if (e.target === $("aboutOverlay")) closeAbout(); };
 }
 
 // ---------- 初始化 ----------
 (async function init() {
   bind();
+  bindUsage();
+  loadUsage(); // 懒加载：面板数据独立拉取，失败不影响主面板
   try {
     await loadState();
     await loadFees();
@@ -838,3 +976,140 @@ function bind() {
     toast("无法连接后台服务：" + e.message);
   }
 })();
+
+// ---------- 用量与流水面板 ----------
+let usageDays = 7;
+let usageLoaded = false;
+let usageChart = null; // echarts 实例
+
+function fmtCredits(n) {
+  if (n == null) return "-";
+  return Number(n).toLocaleString("zh-CN");
+}
+
+function fmtTokensFull(n) {
+  if (!n) return "0";
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + "亿";
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + "万";
+  return Number(n).toLocaleString("zh-CN");
+}
+
+const CH_NAMES = {
+  workbuddy: "WorkBuddyCN", workbuddyai: "WorkBuddyAI", traework: "TraeWork",
+  qoder: "Qoder", qodercn: "QoderCN", qodercom: "QoderCOM", qwenwork: "千问办公", oczen: "OpenCodeZen",
+};
+
+async function loadUsage() {
+  try {
+    const st = await api(`/api/usage?days=${usageDays}`);
+    if (st.disabled) {
+      $("usageSince").textContent = "（统计不可用）";
+      return;
+    }
+    renderUsage(st);
+    usageLoaded = true;
+  } catch (e) { /* 统计加载失败不阻塞 */ }
+}
+
+function renderUsage(st) {
+  // 角标：已记录起始日
+  if (st.recorded_since) {
+    const days = Math.max(1, Math.round((Date.now() - new Date(st.recorded_since + "T00:00:00")) / 86400000) + 1);
+    $("usageSince").textContent = `已记录 ${days} 天`;
+  } else {
+    $("usageSince").textContent = "暂无记录";
+  }
+  $("ucTokens").textContent = fmtTokensFull(st.token.total);
+  $("ucReqs").textContent = fmtCredits(st.token.requests);
+  $("ucSpend").textContent = fmtCredits(st.credit.spend);
+  $("ucEarn").textContent = fmtCredits(st.credit.earn);
+
+  renderModelTable(st.token.by_model || [], usageDays);
+  renderCreditTab(st.credit || {});
+  renderUsageChart(st);
+}
+
+function renderModelTable(rows, days) {
+  const tb = $("tblModels").querySelector("tbody");
+  if (!rows.length) { tb.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无数据（流水自本功能上线后开始记录）</td></tr>`; return; }
+  tb.innerHTML = rows.map((r) => {
+    const avg = days > 1 ? Math.round((r.pt + r.ct) / days) : (r.pt + r.ct);
+    return `<tr>
+      <td>${esc(r.model)}</td><td>${esc(CH_NAMES[r.channel] || r.channel)}</td>
+      <td class="num">${fmtCredits(r.requests)}</td><td class="num">${fmtTokensFull(r.pt + r.ct)}</td>
+      <td class="num">${fmtTokensFull(avg)}</td></tr>`;
+  }).join("");
+}
+
+function renderCreditTab(credit) {
+  const tb = $("tblAccounts").querySelector("tbody");
+  const accts = credit.by_account || [];
+  if (!accts.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无数据</td></tr>`;
+  } else {
+    tb.innerHTML = accts.map((a) => `<tr>
+      <td>${esc(a.name || shortUid(a.uid))}<span class="muted"> · ${esc(CH_NAMES[a.channel] || a.channel)}</span></td>
+      <td class="num ok">${a.earn ? "+" + fmtCredits(a.earn) : "—"}</td>
+      <td class="num warn">${a.spend ? "-" + fmtCredits(a.spend) : "—"}</td>
+      <td class="num danger">${a.expire ? "-" + fmtCredits(a.expire) : "—"}</td>
+      <td class="num">${fmtCredits(a.balance)}</td></tr>`).join("");
+  }
+  const kinds = { earn: "↑签到/发放", spend: "↓消耗", expire: "✖过期" };
+  const recent = credit.recent || [];
+  $("recentList").innerHTML = recent.length
+    ? recent.map((r) => `<div class="rline ${r.kind}">
+        <span class="rtime">${new Date(r.ts * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+        <span class="rkind">${kinds[r.kind] || r.kind}</span>
+        <span class="ramount">${fmtCredits(r.amount)}</span>
+        <span class="rname">${esc(r.note || r.name || shortUid(r.uid))}</span>
+        <span class="rbal">余额 ${fmtCredits(r.balance)}</span></div>`).join("")
+    : `<div class="muted" style="padding:8px">暂无流水</div>`;
+}
+
+function renderUsageChart(st) {
+  const box = $("usageChart");
+  const byDay = (st.token.by_day || []);
+  if (typeof echarts === "undefined") {
+    box.textContent = "图表库加载失败（CDN 不可达），表格不受影响";
+    return;
+  }
+  if (!usageChart) usageChart = echarts.init(box);
+  const dates = byDay.map((d) => d.date);
+  // 渠道系列：取所有出现过的渠道并集
+  const chans = [...new Set(byDay.flatMap((d) => Object.keys(d.by_channel || {})))];
+  const series = chans.map((ch) => ({
+    name: CH_NAMES[ch] || ch, type: "line", smooth: true,
+    data: byDay.map((d) => d.by_channel[ch] || 0),
+  }));
+  usageChart.setOption({
+    tooltip: { trigger: "axis" },
+    legend: { data: series.map((s) => s.name) },
+    grid: { left: 50, right: 20, top: 36, bottom: 28 },
+    xAxis: { type: "category", data: dates },
+    yAxis: { type: "value", axisLabel: { formatter: (v) => fmtTokensFull(v) } },
+    series,
+  }, true);
+  usageChart.resize();
+}
+
+// 面板 tab / 范围切换事件（bind 末尾调用）
+function bindUsage() {
+  $("btnRefreshUsage").onclick = loadUsage;
+  $("usageRange").querySelectorAll(".seg-btn").forEach((b) => {
+    b.onclick = () => {
+      usageDays = parseInt(b.dataset.days, 10);
+      $("usageRange").querySelectorAll(".seg-btn").forEach((x) => x.classList.toggle("active", x === b));
+      loadUsage();
+    };
+  });
+  document.querySelectorAll(".tabs .tab").forEach((b) => {
+    b.onclick = () => {
+      document.querySelectorAll(".tabs .tab").forEach((x) => x.classList.toggle("active", x === b));
+      $("tabToken").classList.toggle("hidden", b.dataset.tab !== "token");
+      $("tabCredit").classList.toggle("hidden", b.dataset.tab !== "credit");
+      if (b.dataset.tab === "token" && usageChart) usageChart.resize();
+    };
+  });
+  window.addEventListener("resize", () => { if (usageChart) usageChart.resize(); });
+}
+

@@ -343,10 +343,10 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 	}
 	total := int64(q.UserQuota.Remaining + q.AddOnQuota.Remaining)
 	items := []provider.ResourceItem{
-		{Name: "用户套餐", Total: int64(q.UserQuota.Total), Used: int64(q.UserQuota.Used), Remain: int64(q.UserQuota.Remaining), Usable: true},
+		{Name: "用户套餐", Total: int64(q.UserQuota.Total), Used: int64(q.UserQuota.Used), Remain: int64(q.UserQuota.Remaining), Key: "userQuota", Usable: true},
 	}
 	if q.AddOnQuota.Total > 0 || q.AddOnQuota.Remaining > 0 {
-		items = append(items, provider.ResourceItem{Name: "赠送额度", Total: int64(q.AddOnQuota.Total), Used: int64(q.AddOnQuota.Used), Remain: int64(q.AddOnQuota.Remaining), Usable: true})
+		items = append(items, provider.ResourceItem{Name: "赠送额度", Total: int64(q.AddOnQuota.Total), Used: int64(q.AddOnQuota.Used), Remain: int64(q.AddOnQuota.Remaining), Key: "addOnQuota", Usable: true})
 	}
 	return total, items, nil
 }
@@ -361,8 +361,8 @@ func (c *Client) Classify(status int, body string) provider.ErrKind { return Cla
 
 // Stream 实现 provider.Upstream（嵌套 SSE → 标准 OpenAI SSE 透传）。
 // model 为客户端请求的模型名，直接注入每个 chunk（上游恒为 "auto"）。
-func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) error {
-	return Stream(w, r, model)
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
+	return StreamCapture(w, r, model, nil)
 }
 
 // Aggregate 实现 provider.Upstream（嵌套 SSE 聚合）。

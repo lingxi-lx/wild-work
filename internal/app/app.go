@@ -10,15 +10,18 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"wild-work/internal/auth"
 	"wild-work/internal/config"
+	"wild-work/internal/ledger"
 	"wild-work/internal/login"
 	loginqoder "wild-work/internal/login_qoder"
 	loginqodercn "wild-work/internal/login_qodercn"
@@ -26,6 +29,7 @@ import (
 	loginqwenwork "wild-work/internal/login_qwenwork"
 	logintrae "wild-work/internal/login_trae"
 	"wild-work/internal/login_wbai"
+	"wild-work/internal/oczen"
 	"wild-work/internal/platform"
 	"wild-work/internal/pool"
 	"wild-work/internal/provider"
@@ -38,7 +42,7 @@ import (
 )
 
 // Version 版本号。
-const Version = "2.4.1"
+const Version = "2.5.0"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -59,6 +63,8 @@ type Options struct {
 	Config     *config.Config
 	Runtimes   map[provider.Kind]*Runtime
 	Handler    *server.Handler
+	// Ledger 流水记账器（main 装配时创建，与 scheduler 共用同一实例）；nil 时 App 自建。
+	Ledger *ledger.Ledger
 }
 
 // App 应用编排。
@@ -88,8 +94,20 @@ type App struct {
 	// 由 main.go 注入；nil 时仅写配置不热更（下次启动生效）。
 	compatSyncer func(defaultChannel string, maxTokensCap int, modelMap map[string]string)
 
+	// proxySyncer 面板保存 proxies 后重新套各渠道 HTTP client（热更新代理）。
+	// 由 main.go 注入；nil 时仅写配置不热更。
+	proxySyncer func(proxies map[string]string)
+
+	// oczenSyncer 面板保存 oczen key 后写入渠道 client（热更新凭证）。
+	// 由 main.go 注入；nil 时仅写配置不热更。
+	oczenSyncer func(key string)
+
 	refreshMu  sync.Mutex // 防并发刷新积分
 	refreshing bool
+
+	// ledger 用量/积分双流水（data/ledger/）；锦上添花统计，nil = 未启用
+	ledger     *ledger.Ledger
+	ledgerStop chan struct{}
 
 	pricingMu      sync.Mutex
 	pricingCache   []provider.ModelPricing // 本地缓存
@@ -109,6 +127,19 @@ func New(opts Options) (*App, error) {
 	a.loginStateFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "login-state.json")
 	a.pricingFP = filepath.Join(filepath.Dir(opts.Config.StateFile), "pricing-cache.json")
 
+	// 用量/积分双流水（data/ledger/）：优先复用 main 装配的实例
+	if opts.Ledger != nil {
+		a.ledger = opts.Ledger
+	} else if lg, err := ledger.New(filepath.Join(filepath.Dir(opts.Config.StateFile), "ledger")); err == nil {
+		a.ledger = lg
+	} else {
+		log.Printf("ledger init failed（统计功能不可用）: %v", err)
+	}
+	if a.ledger != nil {
+		a.ledgerStop = make(chan struct{})
+		go a.ledger.AutoFlush(a.ledgerStop)
+	}
+
 	// 日志文件 data/app.log
 	logFP := filepath.Join(filepath.Dir(opts.Config.StateFile), "app.log")
 	if err := os.MkdirAll(filepath.Dir(logFP), 0o755); err == nil {
@@ -125,11 +156,25 @@ func New(opts Options) (*App, error) {
 
 // Close 关闭日志文件。
 func (a *App) Close() {
+	// 停 ledger 自动落盘并冲刷句柄（丢最后几秒流水可接受，但不能一直丢）
+	if a.ledgerStop != nil {
+		select {
+		case <-a.ledgerStop:
+		default:
+			close(a.ledgerStop)
+		}
+	}
+	if a.ledger != nil {
+		a.ledger.Close()
+	}
 	if a.logFile != nil {
 		_ = a.logFile.Close()
 		a.logFile = nil
 	}
 }
+
+// Ledger 返回流水记账器（未启用时 nil；供 main 装配传给 server handler）。
+func (a *App) Ledger() *ledger.Ledger { return a.ledger }
 
 func (a *App) runtime(kind provider.Kind) *Runtime {
 	if a.runtimes == nil {
@@ -139,7 +184,8 @@ func (a *App) runtime(kind provider.Kind) *Runtime {
 }
 
 func (a *App) firstRuntime() *Runtime {
-	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork} {
+	// oczen 排在末位：它无调度器活动，不应成为「签到时间/下次签到」的展示来源。
+	for _, k := range []provider.Kind{provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork, provider.Oczen} {
 		if rt := a.runtime(k); rt != nil {
 			return rt
 		}
@@ -168,13 +214,34 @@ func (a *App) allStatuses() []pool.Status {
 	return out
 }
 
+// channelOrder 渠道固定展示顺序（面板账号卡片/费率表/设置代理列表统一用此序）。
+// 旧 Qoder 已下线不列；未出现在表中的渠道排最后（按字母序）。
+var channelOrder = map[provider.Kind]int{
+	provider.Oczen: 0, provider.WorkBuddy: 1, provider.WorkBuddyAI: 2,
+	provider.QoderCN: 3, provider.QoderCOM: 4, provider.TraeWork: 5, provider.QwenWork: 6,
+}
+
+// channelRank 渠道排序键：未知渠道排最后。
+func channelRank(k provider.Kind) int {
+	if r, ok := channelOrder[k]; ok {
+		return r
+	}
+	return 100
+}
+
+// sortChannelsByOrder 按 channelOrder 固定顺序稳定排序渠道条目（泛型，复用于各展示处）。
+func sortChannelsByOrder[T any](items []T, kindOf func(T) provider.Kind) {
+	sort.SliceStable(items, func(i, j int) bool { return channelRank(kindOf(items[i])) < channelRank(kindOf(items[j])) })
+}
+
 // noExplicitCheckinKinds 不支持显式签到（手动按钮）的渠道。
 // WorkBuddy 国际版改为定时自动对话保活并领取日活奖励（详见 workbuddyai.DailyCheckin），
 // 无需用户手动触发，故也不提供手动签到入口；
 // 千问办公无签到活动且每日积分服务端被动发放，无需领取/保活。
 // QoderCN 已实现双路径签到（campaigns 主路径），支持手动按钮。
+// OpenCodeZen 匿名通道无账号概念，既无签到也无积分。
 func noExplicitCheckin(k provider.Kind) bool {
-	return k == provider.WorkBuddyAI || k == provider.QwenWork
+	return k == provider.WorkBuddyAI || k == provider.QwenWork || k == provider.Oczen
 }
 
 func (a *App) findRuntimeAuth(uid string) (*Runtime, *auth.Auth) {
@@ -310,6 +377,9 @@ func (a *App) StartLoginFor(kind string) (string, error) {
 	switch k {
 	case provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork:
 		// 这些渠道已有登录编排
+	case provider.Oczen:
+		// 匿名通道无账号可登（凭证固定为 public，启动时已注入虚拟账号）
+		return "", errors.New("OpenCodeZen 为匿名通道，无需也无法添加账号")
 	default:
 		return "", fmt.Errorf("unknown login provider %s", kind)
 	}
@@ -778,6 +848,8 @@ func (a *App) finishLogin() {
 }
 
 // reloadAccounts 用 auths 目录最新文件对齐账号池。
+// 注意：oczen 不在此列——匿名虚拟账号没有凭证文件，
+// SyncToDir 会因「目录扫描不到」而把它从池里剔除，故只能由 main 装配时注入一次。
 func (a *App) reloadAccounts() {
 	if rt := a.runtime(provider.WorkBuddy); rt != nil && rt.Pool != nil {
 		auths, err := auth.LoadWorkBuddyDir(a.cfg.AuthDir, a.cfg.Region)
@@ -924,8 +996,9 @@ func (a *App) refreshIfSessionDead(rt *Runtime, au *auth.Auth, err error) bool {
 
 // creditTotals 一次上游调用同时取回「可消耗余额」「临期额度」与「不可消耗余额」。
 // 三者同源于 UserResourceDetail 的单次响应：remain 即 pool 路由口径的可消耗余额，
-// 临期额度为其中 24h 内（到期日≤明天）到期的部分，不可消耗部分由条目的 Usable 标记汇总得到
-//（渠道不区分专用池时为 0；渠道不下发到期时间时临期为 0，如 Qoder）。
+// 临期额度为其中临期阈值内到期的部分（config.schedule.expiring_threshold_hours，
+// 默认 24h，实际口径「到期日≤今天+阈值」），不可消耗部分由条目的 Usable 标记汇总得到
+// （渠道不区分专用池时为 0；渠道不下发到期时间时临期为 0，如 Qoder）。
 // 遇 401 自动刷新 token 并重试一次（见 refreshIfSessionDead）。
 func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, expiring, unusable int64, err error) {
 	remain, items, err := rt.Upstream.UserResourceDetail(au)
@@ -936,7 +1009,11 @@ func (a *App) creditTotals(rt *Runtime, au *auth.Auth) (usable, expiring, unusab
 		return 0, 0, 0, err
 	}
 	_, unusable = provider.Summarize(items)
-	expiring = provider.ExpiringWithin(items, 24*time.Hour)
+	expiring = provider.ExpiringWithin(items, a.cfg.ExpiringThresholdDur)
+	// 差分记账：与上次快照对比产出 earn/spend/expire 流水（锦上添花，失败不干扰）
+	if a.ledger != nil {
+		a.ledger.DiffCredits(rt.Kind.String(), au.UID, remain, items)
+	}
 	return remain, expiring, unusable, nil
 }
 
@@ -1034,6 +1111,10 @@ func (a *App) RefreshCredits(uid string) (int64, error) {
 	if rt == nil || au == nil {
 		return 0, fmt.Errorf("unknown account %s", uid)
 	}
+	if rt.Kind == provider.Oczen {
+		// 匿名通道无积分概念，面板显示「不适用」，无刷新语义。
+		return 0, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
+	}
 	log.Printf("credits refresh start platform=%s uid=%s", rt.Kind, uid)
 	usable, expiring, unusable, err := a.creditTotals(rt, au)
 	if err != nil {
@@ -1062,6 +1143,10 @@ func (a *App) RefreshAll() RefreshSummary {
 	sum := RefreshSummary{Platforms: map[string]PlatformSummary{}}
 	for _, rt := range a.runtimes {
 		if rt == nil || rt.Pool == nil || rt.Upstream == nil {
+			continue
+		}
+		// oczen 无积分可刷：纳入只会产生一条无意义的「无积分」失败记录。
+		if rt.Kind == provider.Oczen {
 			continue
 		}
 		ps := PlatformSummary{Accounts: []AccountRefresh{}}
@@ -1115,10 +1200,14 @@ type AccountRefresh struct {
 }
 
 // RemoveAccount 删除账号（auth 文件 + 内存池）。
+// oczen 是唯一例外：匿名虚拟账号不可删除（需求约束），返回明确错误而非默默失败。
 func (a *App) RemoveAccount(uid string) error {
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil {
 		return fmt.Errorf("unknown account %s", uid)
+	}
+	if rt.Kind == provider.Oczen {
+		return fmt.Errorf("OpenCodeZen 匿名通道账号不可删除")
 	}
 	if au.FilePath != "" {
 		_ = os.Remove(au.FilePath)
@@ -1129,10 +1218,15 @@ func (a *App) RemoveAccount(uid string) error {
 }
 
 // DisableAccount 停用/启用账号。
+// oczen 匿名账号不可停用：停用后无法从面板恢复，而该渠道只有一个虚拟账号，
+// 停用等于禁用整个渠道。
 func (a *App) DisableAccount(uid string, disabled bool) error {
 	rt, _ := a.findRuntimeAuth(uid)
 	if rt == nil || rt.Pool == nil {
 		return fmt.Errorf("unknown account %s", uid)
+	}
+	if rt.Kind == provider.Oczen {
+		return fmt.Errorf("OpenCodeZen 匿名通道账号不可停用/启用")
 	}
 	rt.Pool.SetDisabled(uid, disabled)
 	if disabled {
@@ -1150,6 +1244,9 @@ func (a *App) ResourceDetail(uid string) (int64, []provider.ResourceItem, error)
 	rt, au := a.findRuntimeAuth(uid)
 	if rt == nil || au == nil || rt.Upstream == nil {
 		return 0, nil, fmt.Errorf("unknown account %s", uid)
+	}
+	if rt.Kind == provider.Oczen {
+		return 0, nil, fmt.Errorf("OpenCodeZen 匿名通道无积分，不适用")
 	}
 	remain, items, err := rt.Upstream.UserResourceDetail(au)
 	if err != nil && a.refreshIfSessionDead(rt, au, err) {
@@ -1287,6 +1384,130 @@ func (a *App) SetCompatSyncer(fn func(defaultChannel string, maxTokensCap int, m
 	a.compatSyncer = fn
 }
 
+// SetProxySyncer 注入代理热更新回调（由 main.go 注入：重新套各渠道 HTTP client）。
+func (a *App) SetProxySyncer(fn func(proxies map[string]string)) { a.proxySyncer = fn }
+
+// SetOczenSyncer 注入 oczen key 热更新回调（由 main.go 注入：写入渠道 client）。
+func (a *App) SetOczenSyncer(fn func(key string)) { a.oczenSyncer = fn }
+
+// TestOczenKey 验证 OpenCodeZen 凭证可用性（设置面板「测试」按钮）。
+// apiKey 非空时先用该 key 临时写入渠道 client（测试后恢复原值），空则直接测当前生效凭证。
+// 判定：200/429 均 return ok（200=配额正常，429=连通但限流，对匿名 key 属正常现象）。
+func (a *App) TestOczenKey(apiKey string) (int, string, error) {
+	rt := a.runtime(provider.Oczen)
+	if rt == nil {
+		return 0, "", fmt.Errorf("oczen 渠道未启用")
+	}
+	c, ok := rt.Upstream.(*oczen.Client)
+	if !ok {
+		return 0, "", fmt.Errorf("oczen 渠道类型异常")
+	}
+	// 临时写入候选 key（含空串 = 测匿名）；结束后恢复配置值，保证面板「取消」不残留半生效状态
+	orig := a.cfg.OczenAPIKey
+	c.SetAPIKey(apiKey)
+	defer c.SetAPIKey(orig)
+	status, body, err := c.TestKey()
+	if err != nil {
+		return 0, body, fmt.Errorf("无法连接 OpenCodeZen（检查网络/代理）：%v", err)
+	}
+	return status, body, nil
+}
+
+// maskKey 脱敏 API key：保留前 5 后 4，中间以 … 代替；空串原样返回。
+func maskKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	r := []rune(key)
+	if len(r) <= 9 {
+		return string(r[:1]) + "…"
+	}
+	return string(r[:5]) + "…" + string(r[len(r)-4:])
+}
+
+// SetProxies 保存单渠道上游代理配置（空串 = 直连）并热更新。
+// key 为渠道 kind，value 为 http(s)://host:port 或 socks5://host:port。
+// 同时接收 oczenKey：设置 OpenCodeZen 自定义 API key（空 = 回匿名凭证）。
+func (a *App) SetProxies(proxies map[string]string, oczenKey string) error {
+	clean := make(map[string]string, len(proxies))
+	for k, v := range proxies {
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" {
+			return fmt.Errorf("渠道名不能为空")
+		}
+		if v == "" {
+			continue // 空串 = 删除该渠道代理（直连）
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("渠道 %s 代理地址无效 %q（应为 http://host:port 或 socks5://host:port）", k, v)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5":
+			clean[k] = v
+		default:
+			return fmt.Errorf("渠道 %s 代理协议 %q 不支持（仅 http/https/socks5）", k, u.Scheme)
+		}
+	}
+	a.mu.Lock()
+	a.cfg.Proxies = clean
+	if oczenKey != "\u0000unset\u0000" { // 哨兵：请求未携带该字段时不改动现有 key
+		a.cfg.OczenAPIKey = strings.TrimSpace(oczenKey)
+	}
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if a.proxySyncer != nil {
+		a.proxySyncer(clean)
+	}
+	if a.oczenSyncer != nil {
+		a.oczenSyncer(a.cfg.OczenAPIKey)
+	}
+	if len(clean) == 0 {
+		log.Printf("上游代理已清空（全部直连）")
+	} else {
+		ks := make([]string, 0, len(clean))
+		for k := range clean {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		log.Printf("上游代理已更新：%s", strings.Join(ks, ", "))
+	}
+	return nil
+}
+
+// SetAccountNickname 修改账号显示名：写回 auth 文件 + 池内即时生效。
+func (a *App) SetAccountNickname(uid, nickname string) error {
+	nickname = strings.TrimSpace(nickname)
+	if nickname == "" {
+		return fmt.Errorf("显示名不能为空")
+	}
+	if len([]rune(nickname)) > 60 {
+		return fmt.Errorf("显示名过长（最多 60 字符）")
+	}
+	rt, au := a.findRuntimeAuth(uid)
+	if rt == nil || au == nil {
+		return fmt.Errorf("unknown account %s", uid)
+	}
+	if rt.Kind == provider.Oczen {
+		return fmt.Errorf("OpenCodeZen 匿名通道账号不可改名")
+	}
+	if au.FilePath == "" {
+		return fmt.Errorf("账号 %s 无凭证文件，不可改名", uid)
+	}
+	a.mu.Lock()
+	au.Nickname = nickname // 池内 AuthByUID 返回同一指针，改字段即生效
+	err := au.SaveAtomic()
+	a.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("保存显示名失败：%v", err)
+	}
+	log.Printf("账号显示名已更新 uid=%s nickname=%s", shortUID(uid), nickname)
+	return nil
+}
+
 // LoginBusy 是否登录中。
 func (a *App) LoginBusy() bool {
 	a.muLogin.Lock()
@@ -1311,15 +1532,18 @@ type AccountView struct {
 	// 仅面板展示；0 表示该渠道不区分或没有此类额度。
 	UnusableCredits int64 `json:"unusable_credits"`
 	// CreditsStale 余额口径不可信（旧版 state 或尚未完成首次成功刷新），UI 显示「待刷新」。
-	CreditsStale   bool   `json:"credits_stale,omitempty"`
+	CreditsStale bool `json:"credits_stale,omitempty"`
+	// CreditsNA 积分概念不适用（如 OpenCodeZen 匿名通道），UI 显示「不适用」
+	// 而非 0，并隐藏刷新积分与明细入口。
+	CreditsNA      bool   `json:"credits_na,omitempty"`
 	Cooling        bool   `json:"cooling"`
-	Until           string `json:"until"`
-	Reason          string `json:"reason"`
-	Disabled        bool   `json:"disabled"`
-	ErrCount        int    `json:"err_count"`
-	LastCheckinOK   bool   `json:"last_checkin_ok"`
-	LastCheckinAt   string `json:"last_checkin_at"`
-	LastCheckinMsg  string `json:"last_checkin_msg"`
+	Until          string `json:"until"`
+	Reason         string `json:"reason"`
+	Disabled       bool   `json:"disabled"`
+	ErrCount       int    `json:"err_count"`
+	LastCheckinOK  bool   `json:"last_checkin_ok"`
+	LastCheckinAt  string `json:"last_checkin_at"`
+	LastCheckinMsg string `json:"last_checkin_msg"`
 }
 
 // State Web UI 初始数据。
@@ -1336,6 +1560,10 @@ type State struct {
 	Autostart      bool          `json:"autostart"`
 	Running        bool          `json:"running"`
 
+	// LanIP 非环回出口 IP（如 192.168.x.x），供面板在监听 0.0.0.0 时提示局域网可用的 API 地址。
+	// 取不到（无网络/全部环回）时为空串。
+	LanIP string `json:"lan_ip"`
+
 	// Compat 模型名路由配置（只读，保存走 POST /api/config/compat）
 	Compat struct {
 		DefaultChannel string            `json:"default_channel"`
@@ -1343,6 +1571,12 @@ type State struct {
 		ModelMap       map[string]string `json:"model_map"`
 		Channels       []string          `json:"channels"` // 可用渠道列表（供 UI 下拉）
 	} `json:"compat"`
+
+	// Proxies 单渠道上游代理（只读，保存走 POST /api/config/proxies）。
+	Proxies map[string]string `json:"proxies"`
+
+	// OczenAPIKey OpenCodeZen 自定义 API key（只读脱敏回显：sk-xxx…尾4位；保存走同端点）。
+	OczenAPIKey string `json:"oczen_api_key"`
 }
 
 // GetState 返回面板初始数据。
@@ -1358,6 +1592,7 @@ func (a *App) GetState() State {
 		Version:        Version,
 		Autostart:      a.AutostartEnabled(),
 		Running:        a.ServerRunning(),
+		LanIP:          lanIP(),
 	}
 	st.Compat.DefaultChannel = a.cfg.Compat.DefaultChannel
 	st.Compat.MaxTokensCap = a.cfg.Compat.MaxTokensCap
@@ -1369,6 +1604,12 @@ func (a *App) GetState() State {
 		st.Compat.Channels = append(st.Compat.Channels, k.String())
 	}
 	sort.Strings(st.Compat.Channels)
+	st.Proxies = map[string]string{}
+	for k, v := range a.cfg.Proxies {
+		st.Proxies[k] = v
+	}
+	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
+	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
 	st.Accounts = a.accountViews()
 	return st
 }
@@ -1377,24 +1618,29 @@ func (a *App) accountViews() []AccountView {
 	statuses := a.allStatuses()
 	out := make([]AccountView, 0, len(statuses))
 	for _, s := range statuses {
+		group := a.accountGroup(s.UID)
 		out = append(out, AccountView{
 			UID:             s.UID,
-			Group:           a.accountGroup(s.UID),
+			Group:           group,
 			Nickname:        s.Nickname,
 			Credits:         s.Credits,
 			ExpiringCredits: s.ExpiringCredits,
 			UnusableCredits: s.UnusableCredits,
 			CreditsStale:    s.CreditsStale,
-			Cooling:         s.Cooling,
-			Until:           fmtTime(s.Until),
-			Reason:          s.Reason,
-			Disabled:        s.Disabled,
-			ErrCount:        s.ErrCount,
-			LastCheckinOK:   s.LastCheckinOK,
-			LastCheckinAt:   fmtTime(s.LastCheckinAt),
-			LastCheckinMsg:  s.LastCheckinMsg,
+			// 匿名渠道无积分：前端据此显示「不适用」
+			CreditsNA:      group == provider.Oczen.String(),
+			Cooling:        s.Cooling,
+			Until:          fmtTime(s.Until),
+			Reason:         s.Reason,
+			Disabled:       s.Disabled,
+			ErrCount:       s.ErrCount,
+			LastCheckinOK:  s.LastCheckinOK,
+			LastCheckinAt:  fmtTime(s.LastCheckinAt),
+			LastCheckinMsg: s.LastCheckinMsg,
 		})
 	}
+	// 面板固定渠道序展示：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → 千问办公
+	sortChannelsByOrder(out, func(v AccountView) provider.Kind { return provider.Kind(v.Group) })
 	return out
 }
 
@@ -1615,12 +1861,76 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/config/proxies", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Proxies     map[string]string `json:"proxies"`
+			OczenAPIKey *string           `json:"oczen_api_key"` // 指针：区分「未携带」与「显式清空」
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		key := "\u0000unset\u0000"
+		if req.OczenAPIKey != nil {
+			key = *req.OczenAPIKey
+		}
+		if err := a.SetProxies(req.Proxies, key); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/oczen_test", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			APIKey string `json:"api_key"` // 空 = 用当前生效凭证（配置中的 key 或匿名）
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		status, body, err := a.TestOczenKey(req.APIKey)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "status": 0, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": status == 200 || status == 429, "status": status, "body": body})
+	})
+	mux.HandleFunc("POST /api/account/nickname", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UID      string `json:"uid"`
+			Nickname string `json:"nickname"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetAccountNickname(req.UID, req.Nickname); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
 	mux.HandleFunc("GET /api/fees", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.FeesInfo())
 	})
 	mux.HandleFunc("POST /api/fees/refresh", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, a.FeesInfo())
 		go a.safeGo(func() { a.RefreshPricing() })
+	})
+	mux.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
+		if a.ledger == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"disabled": true})
+			return
+		}
+		days := 7
+		if d, err := strconv.Atoi(r.URL.Query().Get("days")); err == nil {
+			days = d
+		}
+		// enrich：uid → 昵称/渠道（查 pool 状态，仅一次遍历）
+		nameOf := map[string]string{}
+		chOf := map[string]string{}
+		for _, rt := range a.runtimes {
+			if rt == nil || rt.Pool == nil {
+				continue
+			}
+			for _, st := range rt.Pool.List() {
+				nameOf[st.UID] = st.Nickname
+				chOf[st.UID] = rt.Kind.String()
+			}
+		}
+		stats := a.ledger.Query(days, func(uid string) (string, string) { return nameOf[uid], chOf[uid] })
+		writeJSON(w, http.StatusOK, stats)
 	})
 	mux.HandleFunc("GET /api/logs", func(w http.ResponseWriter, r *http.Request) {
 		fp := filepath.Join(filepath.Dir(a.cfg.StateFile), "app.log")
@@ -1689,6 +1999,10 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 	}
 	out := make([]feesChannel, 0, len(order))
 	for _, k := range order {
+		// 旧 Qoder 渠道已从界面下线：不拉取/不展示其模型列表（路由保留，存量账号仍可用）
+		if k == provider.Qoder {
+			continue
+		}
 		infos := modelsByKind[k]
 		if len(infos) == 0 {
 			continue
@@ -1763,9 +2077,9 @@ func (a *App) FeesInfo() map[string]any {
 		go a.safeGo(func() { a.RefreshPricing() })
 	}
 
-	channels := buildFeesChannels(modelsByKind, cached, []provider.Kind{
-		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.TraeCode, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork,
-	})
+	// 展示顺序固定：OpenCodeZen → WorkBuddyCN → WorkBuddyAI → QoderCN → QoderCOM → TraeWork → TraeCode → 千问办公（旧 Qoder 跳过）
+	order := []provider.Kind{provider.Oczen, provider.WorkBuddy, provider.WorkBuddyAI, provider.QoderCN, provider.QoderCOM, provider.TraeWork, provider.TraeCode, provider.QwenWork}
+	channels := buildFeesChannels(modelsByKind, cached, order)
 
 	result := map[string]any{
 		"note":       "本表以各渠道实际可用模型列表为准；倍率为空的模型表示上游未返回定价（未知）。",
@@ -1809,7 +2123,8 @@ func (a *App) RefreshPricing() {
 	var errs []string
 
 	for _, rt := range a.runtimes {
-		if rt == nil || rt.Pool == nil || rt.Upstream == nil || len(rt.Pool.List()) == 0 {
+		// 旧 Qoder 渠道已从界面下线：不再自动刷新其模型/费率（也避免无谓的 token refresh 报错日志）
+		if rt == nil || rt.Pool == nil || rt.Upstream == nil || rt.Kind == provider.Qoder || len(rt.Pool.List()) == 0 {
 			continue
 		}
 		acct := rt.Pool.Pick()
@@ -1946,6 +2261,22 @@ func normalizeMinutes(minutes []int) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// lanIP 返回非环回的出站 IPv4/IPv6 地址（如 192.168.1.5），用于监听 0.0.0.0 时
+// 面板提示局域网可用的 API 地址。UDP Dial 不实际发包，仅让内核选路由；
+// 无网络/全部环回时返回空串，调用方自行兑底。
+func lanIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil || addr.IP.IsLoopback() {
+		return ""
+	}
+	return addr.IP.String()
 }
 
 func fmtTime(t time.Time) string {

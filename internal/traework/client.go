@@ -516,8 +516,10 @@ type entPackage struct {
 		Quota             struct {
 			CreditsLimit float64 `json:"credits_limit"`
 		} `json:"quota"`
-		PackageName string `json:"package_name"`
-		PackageType string `json:"package_type"`
+		// EntitlementID 条目唯一标识（如 "340864129538"/"checkin_20260817_..."），ledger 差分对账用。
+		EntitlementID string `json:"entitlement_id"`
+		PackageName   string `json:"package_name"`
+		PackageType   string `json:"package_type"`
 	} `json:"entitlement_base_info"`
 	DisplayDesc string `json:"display_desc"`
 	GroupName   string `json:"group_name"`
@@ -604,7 +606,9 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			Used:     int64(p.Usage.CreditsAmount),
 			Remain:   packRemain(p),
 			ExpireAt: unixDate(p.ExpireTime),
-			Usable:   p.EntitlementBaseInfo.AvailableEndpoint == 0,
+			// entitlement_id 是上游稳定标识，供 ledger 差分对账（过期/消耗归因）
+			Key:    p.EntitlementBaseInfo.EntitlementID,
+			Usable: p.EntitlementBaseInfo.AvailableEndpoint == 0,
 		})
 	}
 	return usable, items, nil
@@ -649,7 +653,7 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
 }
 
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
-func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) error {
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
 	return StreamWithModel(w, r, model)
 }
 func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
