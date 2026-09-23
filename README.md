@@ -48,13 +48,10 @@
 | [zhangdailin/Orchids-2api](https://github.com/zhangdailin/Orchids-2api) | Qoder 渠道端点与逻辑比对参考 |
 | [jasonxu114514/opencode2api](https://github.com/jasonxu114514/opencode2api) | OpenCodeZen（oczen）匿名渠道 endpoint 特殊要求分析 |
 | [FishBottle7/opencode2dsh](https://github.com/FishBottle7/opencode2dsh) | 同上，OpenCode 相关补充参考 |
-| [287775856/workbuddy2api-gui](https://github.com/287775856/workbuddy2api-gui) | 同类项目账号池状态可视化面板参考 |
-| [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) | 同类项目账号管理工具参考 |
-
-同时感谢本项目的代码贡献者：[@bibibiu-84](https://github.com/bibibiu-84)（TraeCode 渠道，PR #33）、
-[@youki258](https://github.com/youki258)（Qoder 上下文档位透传，PR #34）。
 
 > 若上述项目作者认为本项目的引用方式不当，请提 issue 联系，我们会立即调整或移除相关内容。
+
+同时感谢给本项目 PR 的各位贡献者！
 
 ## 使用方式
 
