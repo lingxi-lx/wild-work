@@ -47,8 +47,6 @@ type CreditEntry struct {
 const (
 	// keepMonths 流水分段保留月数（启动时清理更早的分段）。
 	keepMonths = 6
-	// recentCreditCap 「最近流水」展示条数上限。
-	recentCreditCap = 50
 )
 
 // Ledger 双流水记账器。goroutine 安全。
@@ -237,17 +235,6 @@ type ModelStat struct {
 	CT       int64  `json:"ct"`
 }
 
-// AccountStat 账号维度积分小计。
-type AccountStat struct {
-	UID     string `json:"uid"`
-	Name    string `json:"name,omitempty"` // 渠道/昵称（查询时由调用方回填）
-	Channel string `json:"channel"`
-	Earn    int64  `json:"earn"`
-	Spend   int64  `json:"spend"`   // 正数展示（绝对值）
-	Expire  int64  `json:"expire"`  // 正数展示（绝对值）
-	Balance int64  `json:"balance"` // 范围内最后一条流水后的余额
-}
-
 // RecentCredit 最近一条积分流水（展示用）。
 type RecentCredit struct {
 	Ts      int64  `json:"ts"`
@@ -284,13 +271,13 @@ type DayTokens struct {
 	ByChannel map[string]int64 `json:"by_channel"`
 }
 
-// CreditStats 积分口径统计。
+// CreditStats 积分口径统计：总量 + 原始条目（分页/图表由前端自算）。
 type CreditStats struct {
-	Earn      int64          `json:"earn"`
-	Spend     int64          `json:"spend"`      // 正数
-	Expire    int64          `json:"expire"`     // 正数
-	ByAccount []AccountStat  `json:"by_account"` // 按 spend 降序
-	Recent    []RecentCredit `json:"recent"`     // 最近流水（≤50 条，时间倒序）
+	Earn    int64             `json:"earn"`
+	Spend   int64             `json:"spend"`   // 正数
+	Expire  int64             `json:"expire"`  // 正数
+	Entries []RecentCredit    `json:"entries"` // 窗口内全量条目（时间升序）
+	NameMap map[string]string `json:"name_map,omitempty"` // uid → 昵称
 }
 
 // Query 聚合最近 days 天的流水（days ∈ {1,7,30}，其他值按 7 处理）。
@@ -323,8 +310,7 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 	hours := map[int]*dayAgg{} // 今天的小时桶（days=1 用）
 
 	var sinceTs int64
-	creditAcct := map[string]*AccountStat{}
-	var recent []RecentCredit
+	var entries []RecentCredit
 
 	for m := range months {
 		for _, prefix := range []string{"usage", "credit"} {
@@ -383,24 +369,15 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 					if e.Ts < fromTs {
 						return
 					}
-					a := creditAcct[e.UID]
-					if a == nil {
-						a = &AccountStat{UID: e.UID, Channel: e.Ch}
-						creditAcct[e.UID] = a
-					}
 					switch e.Kind {
 					case "earn":
-						a.Earn += e.Amount
 						st.Credit.Earn += e.Amount
 					case "spend":
-						a.Spend += -e.Amount
 						st.Credit.Spend += -e.Amount
 					case "expire":
-						a.Expire += -e.Amount
 						st.Credit.Expire += -e.Amount
 					}
-					a.Balance = e.Balance // 顺时间序扫描，最后一条即期末
-					recent = append(recent, RecentCredit{Ts: e.Ts, UID: e.UID, Channel: e.Ch,
+					entries = append(entries, RecentCredit{Ts: e.Ts, UID: e.UID, Channel: e.Ch,
 						Kind: e.Kind, Amount: e.Amount, Balance: e.Balance, Note: e.Note})
 				}
 			})
@@ -451,40 +428,20 @@ func (l *Ledger) Query(days int, enrich func(uid string) (name, channel string))
 		st.Token.ByModel = append(st.Token.ByModel, *models[k])
 	}
 
-	// 账号小计 + 昵称回填
-	uk := make([]string, 0, len(creditAcct))
-	for k := range creditAcct {
-		uk = append(uk, k)
-	}
-	sort.Slice(uk, func(i, j int) bool {
-		a, b := creditAcct[uk[i]], creditAcct[uk[j]]
-		if a.Spend != b.Spend {
-			return a.Spend > b.Spend
-		}
-		return a.UID < b.UID
-	})
-	for _, k := range uk {
-		a := creditAcct[k]
-		if enrich != nil {
-			if name, _ := enrich(a.UID); name != "" {
-				a.Name = name
+	// 返回原始条目 + 昵称表（时间升序；分页/top10 折线由前端自算）
+	st.Credit.Entries = entries
+	if len(entries) != 0 && enrich != nil {
+		st.Credit.NameMap = map[string]string{}
+		seen := map[string]bool{}
+		for _, r := range entries {
+			if seen[r.UID] {
+				continue
 			}
-		}
-		st.Credit.ByAccount = append(st.Credit.ByAccount, *a)
-	}
-
-	// 最近流水：倒序截断
-	if len(recent) > recentCreditCap {
-		recent = recent[len(recent)-recentCreditCap:]
-	}
-	for i := len(recent) - 1; i >= 0; i-- {
-		r := recent[i]
-		if enrich != nil {
+			seen[r.UID] = true
 			if name, _ := enrich(r.UID); name != "" {
-				r.Name = name
+				st.Credit.NameMap[r.UID] = name
 			}
 		}
-		st.Credit.Recent = append(st.Credit.Recent, r)
 	}
 	return st
 }

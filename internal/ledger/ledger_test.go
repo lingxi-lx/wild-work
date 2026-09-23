@@ -111,21 +111,18 @@ func TestQueryAggregation(t *testing.T) {
 	if len(st.Token.ByModel) != 2 {
 		t.Fatalf("byModel len=%d", len(st.Token.ByModel))
 	}
-	// 模型榜降序：glm-5.2 (165) > doubao (300)? doubao 300 更大，应排前
+	// 模型榜降序：glm-5.2 (165) < doubao (300)，doubao 应排前
 	if st.Token.ByModel[0].Model != "doubao-seed" {
 		t.Fatalf("byModel[0]=%s want doubao-seed", st.Token.ByModel[0].Model)
 	}
 	if st.Credit.Earn != 1550 || st.Credit.Spend != 30 {
 		t.Fatalf("earn=%d spend=%d", st.Credit.Earn, st.Credit.Spend)
 	}
-	if len(st.Credit.ByAccount) != 2 {
-		t.Fatalf("byAccount=%d", len(st.Credit.ByAccount))
+	// 原始条目：时间升序全量返回
+	if len(st.Credit.Entries) != 2 {
+		t.Fatalf("entries=%d want 2", len(st.Credit.Entries))
 	}
-	if len(st.Credit.Recent) == 0 {
-		t.Fatal("recent 空")
-	}
-	// recent 倒序：最近一条是 spend
-	if st.Credit.Recent[0].Kind != "spend" {
-		t.Fatalf("recent[0].kind=%s want spend", st.Credit.Recent[0].Kind)
+	if st.Credit.Entries[0].Kind != "earn" || st.Credit.Entries[1].Kind != "spend" {
+		t.Fatalf("entries kinds=%s,%s want earn,spend", st.Credit.Entries[0].Kind, st.Credit.Entries[1].Kind)
 	}
 }

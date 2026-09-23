@@ -30,8 +30,9 @@ const (
 	// AnonymousUID 虚拟账号 UID。仅有一个，不可增删停用。
 	AnonymousUID = "oczen-anonymous"
 
-	// AnonymousName 面板展示名（需求指定格式）。
-	AnonymousName = "[OpenCodeZen] 匿名"
+	// AnonymousName 面板展示名：仅凭证形态（匿名/私有Key），
+	// 渠道名由前端 badge 渲染（避免重复「OpenCodeZen OpenCodeZen」）。
+	AnonymousName = "匿名"
 
 	// userAgent 伪装 OpenCode CLI 的 UA（上游 1.18.x 实测可通过）。
 	userAgent = "opencode/1.18.31 (windows amd64; node22)"

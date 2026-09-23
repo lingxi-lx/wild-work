@@ -232,6 +232,13 @@ body {
 }
 .fees .cap-icon:hover { opacity: 1; }
 
+/* 上下文窗口标记：模型 ID 后的 (1M)/(180K) 小字标 */
+.fees .ctx-tag {
+  font-size: 11px; color: var(--muted); margin-left: 2px;
+  font-variant-numeric: tabular-nums; cursor: help;
+}
+.fees code + .ctx-tag { vertical-align: baseline; }
+
 /* 配置说明 */
 .docs { font-size: 13px; }
 .docs p { margin-bottom: 8px; }
@@ -382,7 +389,16 @@ body {
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .table .empty-cell { text-align: center; color: var(--muted); padding: 18px; }
 
-.recent-title { font-size: 12px; color: var(--muted); margin: 14px 0 6px; }
+/* 主面板双 Tab（账号管理 / 用量与流水） */
+.main-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.mtab { border: 0; background: transparent; padding: 10px 18px; font-size: 15px; font-weight: 600; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.mtab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.mtab .ver { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+
+.pager { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; justify-content: center; }
+.pager .pg-info { font-size: 12px; color: var(--muted); min-width: 48px; text-align: center; }
+.pager .btn[disabled] { opacity: .4; cursor: default; }
+
 .recent { display: flex; flex-direction: column; gap: 2px; }
 .rline { display: flex; gap: 10px; align-items: baseline; font-size: 12px; padding: 4px 8px; border-radius: 6px; }
 .rline:nth-child(odd) { background: var(--bg); }
@@ -391,7 +407,8 @@ body {
 .rline.spend .ramount { color: var(--warn); font-weight: 600; }
 .rline.expire .ramount { color: var(--danger); font-weight: 600; }
 .rline .ramount { width: 90px; text-align: right; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.rline .rname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rline .rname { color: var(--muted); flex-shrink: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rline .racct { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rline .rbal { color: var(--muted); flex-shrink: 0; }
 
 .muted { color: var(--muted); }

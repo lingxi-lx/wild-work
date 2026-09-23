@@ -1290,6 +1290,26 @@ func (a *App) SetCheckinTimes(times []string) error {
 	return nil
 }
 
+// SetExpiringDays 更新临期阈值（天）：保存配置并即时生效。
+// 仅支持 1/2/3 天（UI 下拉框限定；日期粒度到期判定低于一天无意义，故下限 1）。
+// 生效机制：ExpiringThresholdDur 修改后，下一次余额刷新（手动/签到/自动循环）
+// 即按新阈值重算 pool 的 expiring 字段，无需额外刷新动作。
+func (a *App) SetExpiringDays(days int) error {
+	if days != 1 && days != 2 && days != 3 {
+		return errors.New("临期阈值仅支持 1/2/3 天")
+	}
+	a.mu.Lock()
+	a.cfg.Schedule.ExpiringThresholdHours = days * 24
+	a.cfg.ExpiringThresholdDur = time.Duration(days) * 24 * time.Hour
+	err := config.Save(a.cfg, a.cfgPath)
+	a.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	log.Printf("临期阈值已更新：%d 天", days)
+	return nil
+}
+
 // SetListen 修改 API 监听主机 + 端口：保存配置并热切换监听。
 func (a *App) SetListen(host string, port int) error {
 	if port <= 0 || port > 65535 {
@@ -1551,6 +1571,7 @@ type State struct {
 	Accounts       []AccountView `json:"accounts"`
 	CheckinTimes   []string      `json:"checkin_times"`
 	KeepaliveHours []int         `json:"keepalive_hours"`
+	ExpiringDays   int           `json:"expiring_days"` // 临期阈值（天），仅支持 1/2/3
 	ListenHost     string        `json:"listen_host"`
 	ListenPort     int           `json:"listen_port"`
 	APIKey         string        `json:"api_key"`
@@ -1593,6 +1614,7 @@ func (a *App) GetState() State {
 		Autostart:      a.AutostartEnabled(),
 		Running:        a.ServerRunning(),
 		LanIP:          lanIP(),
+		ExpiringDays:   int(a.cfg.ExpiringThresholdDur / (24 * time.Hour)),
 	}
 	st.Compat.DefaultChannel = a.cfg.Compat.DefaultChannel
 	st.Compat.MaxTokensCap = a.cfg.Compat.MaxTokensCap
@@ -1809,6 +1831,17 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := a.SetCheckinTimes(req.Times); err != nil {
+			apiError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /api/config/expiring_days", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Days int `json:"days"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := a.SetExpiringDays(req.Days); err != nil {
 			apiError(w, http.StatusBadRequest, err.Error())
 			return
 		}

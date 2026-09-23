@@ -302,9 +302,12 @@ function renderAccounts() {
           <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
           <span class="icon-op danger" title="删除账号" onclick="removeAcct('${a.uid}')">✕</span>`;
-    // 显示名：点击直接弹出改名框（匿名渠道不可改，降级为普通文本）
+    // 显示名：点击直接弹出改名框（匿名渠道不可改，降级为普通文本）。
+    // oczen 特例：渠道名已由 badge 承担，名字按凭证形态显示「匿名/私有Key」。
+    const isOczen = a.group === "oczen";
+    const oczenName = (state.oczen_api_key || "") ? "私有Key" : "匿名";
     const nameHtml = noCredits
-      ? `<span class="acct-name">${esc(a.nickname || shortUid(a.uid))}</span>`
+      ? `<span class="acct-name">${esc(isOczen ? oczenName : (a.nickname || shortUid(a.uid)))}</span>`
       : `<span class="acct-name editable" title="点击修改显示名" onclick="openRename('${a.uid}','${esc(a.nickname || shortUid(a.uid)).replace(/'/g, "&#39;")}')">${esc(a.nickname || shortUid(a.uid))}</span>`;
 
     return `
@@ -354,6 +357,7 @@ function renderFees(fees) {
 
   // 能力图标：模型 ID 后的小标记，title 属性提供文字描述。
   // 只展示上游明确声明的能力；未声明的（字段缺失或上游返回 false）不显示图标。
+  // tool_calls 不展示：几乎所有模型都支持，图标信息量低。
   const capIcons = (m) => {
     if (!m) return "";
     const caps = [];
@@ -363,10 +367,14 @@ function renderFees(fees) {
     if (m.supports_reasoning) {
       caps.push(`<span class="cap-icon cap-reason" title="支持思考/推理模式：回复前会进行推理（可能含 reasoning_content）">🧠</span>`);
     }
-    if (m.supports_tools) {
-      caps.push(`<span class="cap-icon cap-tool" title="支持函数/工具调用（tool_calls）">🔧</span>`);
-    }
     return caps.length > 0 ? ` <span class="cap-icons">${caps.join("")}</span>` : "";
+  };
+
+  // 上下文标记：模型 ID 后的 (1M)/(180K) 小字标。
+  // 只在上游接口真实返回时展示（has_context），不拿估算值充数。
+  const ctxTag = (m) => {
+    if (!m || !m.has_context || !m.context_window) return "";
+    return ` <span class="ctx-tag" title="上下文窗口：${fmtTokens(m.context_window)} tokens">(${fmtTokens(m.context_window)})</span>`;
   };
 
   // 能力文字摘要，拼进模型 tooltip。
@@ -377,7 +385,6 @@ function renderFees(fees) {
     const yes = [], unknown = [];
     (m.supports_images ? yes : unknown).push("图像输入");
     (m.supports_reasoning ? yes : unknown).push("思考模式");
-    (m.supports_tools ? yes : unknown).push("工具调用");
     const parts = [];
     if (yes.length) parts.push(`支持：${yes.join("、")}`);
     if (unknown.length) parts.push(`上游未声明：${unknown.join("、")}`);
@@ -428,8 +435,8 @@ function renderFees(fees) {
     for (let i = 0; i < models.length; i += 2) {
       const m1 = models[i];
       const m2 = models[i + 1];
-      const id1 = m1 ? `<code title="${esc(modelTip(m1))}">${esc(m1.model)}</code>${capIcons(m1)}${noteCell(m1)}` : "";
-      const id2 = m2 ? `<code title="${esc(modelTip(m2))}">${esc(m2.model)}</code>${capIcons(m2)}${noteCell(m2)}` : "";
+      const id1 = m1 ? `<code title="${esc(modelTip(m1))}">${esc(m1.model)}</code>${ctxTag(m1)}${capIcons(m1)}${noteCell(m1)}` : "";
+      const id2 = m2 ? `<code title="${esc(modelTip(m2))}">${esc(m2.model)}</code>${ctxTag(m2)}${capIcons(m2)}${noteCell(m2)}` : "";
       html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td><td>${id2}</td><td>${rateCell(m2)}</td></tr>`;
     }
   }
@@ -665,8 +672,9 @@ function openSettings() {
   renderProxyList();
   $("oczenKeyInput").value = state.oczen_api_key || ""; // 回显脱敏值；未改动则原样回传，后端按脱敏值识别为「未变」
   $("oczenKeyInput").dataset.touched = "";
-  // 自动签到 + 开机自启
+  // 自动签到 + 开机自启 + 临期阈值
   $("chkAutostart").checked = !!state.autostart;
+  $("selExpiring").value = String(state.expiring_days || 1);
   $("settingsOverlay").classList.remove("hidden");
 }
 
@@ -757,7 +765,15 @@ async function saveSettings() {
     await api("/api/config/compat", { default_channel: defaultChannel, max_tokens_cap: maxTokensCap, model_map: modelMap });
   } catch (e) { toast(e.message); return; }
 
-  // 4) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
+  // 4) 临期阈值（1/2/3 天，独立端点即时生效）
+  const expDays = parseInt($("selExpiring").value, 10) || 1;
+  if (expDays !== (state.expiring_days || 1)) {
+    try {
+      await api("/api/config/expiring_days", { days: expDays });
+    } catch (e) { toast(e.message); return; }
+  }
+
+  // 5) API-Key（最后保存：改 Key 可能影响当前会话的后续请求）
   try {
     await api("/api/config/api_key", { key: $("keyInput").value.trim() });
   } catch (e) { toast(e.message); return; }
@@ -967,8 +983,9 @@ function bind() {
 // ---------- 初始化 ----------
 (async function init() {
   bind();
+  bindMainTabs();
   bindUsage();
-  loadUsage(); // 懒加载：面板数据独立拉取，失败不影响主面板
+  loadUsage(); // 页面加载即拉取（首次渲染自动刷新，不依赖手动点击）
   try {
     await loadState();
     await loadFees();
@@ -979,8 +996,13 @@ function bind() {
 
 // ---------- 用量与流水面板 ----------
 let usageDays = 7;
-let usageLoaded = false;
-let usageChart = null; // echarts 实例
+let usageChart = null;    // token 折线图（echarts 实例）
+let creditChart = null;   // 积分消耗折线图（echarts 实例）
+let recentAll = [];       // 全量最近流水（分页源，时间升序）
+let recentPage = 0;
+let lastNames = {};       // 最近一次渲染的 uid→昵称表（翻页时复用）
+const RECENT_PAGE_SIZE = 20;
+const MODEL_TOP_N = 20;   // 模型榜只保留前 N 名
 
 function fmtCredits(n) {
   if (n == null) return "-";
@@ -1007,7 +1029,6 @@ async function loadUsage() {
       return;
     }
     renderUsage(st);
-    usageLoaded = true;
   } catch (e) { /* 统计加载失败不阻塞 */ }
 }
 
@@ -1027,12 +1048,14 @@ function renderUsage(st) {
   renderModelTable(st.token.by_model || [], usageDays);
   renderCreditTab(st.credit || {});
   renderUsageChart(st);
+  renderCreditChart(st.credit || {});
 }
 
 function renderModelTable(rows, days) {
   const tb = $("tblModels").querySelector("tbody");
   if (!rows.length) { tb.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无数据（流水自本功能上线后开始记录）</td></tr>`; return; }
-  tb.innerHTML = rows.map((r) => {
+  const top = rows.slice(0, MODEL_TOP_N); // 前 20 名，已按 token 降序
+  tb.innerHTML = top.map((r) => {
     const avg = days > 1 ? Math.round((r.pt + r.ct) / days) : (r.pt + r.ct);
     return `<tr>
       <td>${esc(r.model)}</td><td>${esc(CH_NAMES[r.channel] || r.channel)}</td>
@@ -1042,38 +1065,52 @@ function renderModelTable(rows, days) {
 }
 
 function renderCreditTab(credit) {
-  const tb = $("tblAccounts").querySelector("tbody");
-  const accts = credit.by_account || [];
-  if (!accts.length) {
-    tb.innerHTML = `<tr><td colspan="5" class="empty-cell">暂无数据</td></tr>`;
-  } else {
-    tb.innerHTML = accts.map((a) => `<tr>
-      <td>${esc(a.name || shortUid(a.uid))}<span class="muted"> · ${esc(CH_NAMES[a.channel] || a.channel)}</span></td>
-      <td class="num ok">${a.earn ? "+" + fmtCredits(a.earn) : "—"}</td>
-      <td class="num warn">${a.spend ? "-" + fmtCredits(a.spend) : "—"}</td>
-      <td class="num danger">${a.expire ? "-" + fmtCredits(a.expire) : "—"}</td>
-      <td class="num">${fmtCredits(a.balance)}</td></tr>`).join("");
-  }
+  const entries = credit.entries || [];
+  const names = credit.name_map || {};
+  // 分页渲染流水（折线图由 renderCreditChart 基于同一份条目自算）
+  recentAll = entries;
+  recentPage = 0;
+  lastNames = names;
+  renderRecentPage(names);
+  renderCreditChart(entries, names);
+}
+
+function renderRecentPage(names) {
   const kinds = { earn: "↑签到/发放", spend: "↓消耗", expire: "✖过期" };
-  const recent = credit.recent || [];
-  $("recentList").innerHTML = recent.length
-    ? recent.map((r) => `<div class="rline ${r.kind}">
+  const pages = Math.max(1, Math.ceil(recentAll.length / RECENT_PAGE_SIZE));
+  if (recentPage >= pages) recentPage = pages - 1;
+  // 倒序展示（最新在前）：从尾部往前取当前页
+  const end = recentAll.length - recentPage * RECENT_PAGE_SIZE;
+  const start = Math.max(0, end - RECENT_PAGE_SIZE);
+  const slice = recentAll.slice(start, end).reverse();
+  $("recentList").innerHTML = slice.length
+    ? slice.map((r) => `<div class="rline ${r.kind}">
         <span class="rtime">${new Date(r.ts * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
         <span class="rkind">${kinds[r.kind] || r.kind}</span>
         <span class="ramount">${fmtCredits(r.amount)}</span>
-        <span class="rname">${esc(r.note || r.name || shortUid(r.uid))}</span>
+        <span class="racct">${esc((names || {})[r.uid] || shortUid(r.uid))}<span class="muted"> · ${esc(CH_NAMES[r.channel] || r.channel)}</span></span>
+        <span class="rname">${esc(r.note || "")}</span>
         <span class="rbal">余额 ${fmtCredits(r.balance)}</span></div>`).join("")
     : `<div class="muted" style="padding:8px">暂无流水</div>`;
+  $("pgInfo").textContent = `${recentPage + 1} / ${pages}`;
+  $("pgPrev").disabled = recentPage === 0;
+  $("pgNext").disabled = recentPage >= pages - 1;
+}
+
+// makeChart 懒建 echarts 实例；CDN 不可达时在容器里显示提示并返回 null。
+function makeChart(box, existing) {
+  if (typeof echarts === "undefined") {
+    box.textContent = "图表库加载失败（CDN 不可达），表格不受影响";
+    return null;
+  }
+  return existing || echarts.init(box);
 }
 
 function renderUsageChart(st) {
   const box = $("usageChart");
+  usageChart = makeChart(box, usageChart);
+  if (!usageChart) return;
   const byDay = (st.token.by_day || []);
-  if (typeof echarts === "undefined") {
-    box.textContent = "图表库加载失败（CDN 不可达），表格不受影响";
-    return;
-  }
-  if (!usageChart) usageChart = echarts.init(box);
   const dates = byDay.map((d) => d.date);
   // 渠道系列：取所有出现过的渠道并集
   const chans = [...new Set(byDay.flatMap((d) => Object.keys(d.by_channel || {})))];
@@ -1092,6 +1129,62 @@ function renderUsageChart(st) {
   usageChart.resize();
 }
 
+// renderCreditChart 积分消耗折线图：按日聚合各账号 spend（原始条目自算），
+// 只画消耗总量前 10 的账号；不含入项/过期。
+function renderCreditChart(entries, names) {
+  const box = $("creditChart");
+  const spends = entries.filter((e) => e.kind === "spend");
+  if (!spends.length) { box.style.display = "none"; if (creditChart) { creditChart.dispose(); creditChart = null; } return; }
+  box.style.display = "";
+  creditChart = makeChart(box, creditChart);
+  if (!creditChart) return;
+  // 按日 × 账号聚合
+  const dates = [...new Set(spends.map((e) => fmtDay(e.ts)))].sort();
+  const byAcct = {}; // uid -> {date: spend}
+  const totals = {}; // uid -> 总消耗
+  for (const e of spends) {
+    const d = fmtDay(e.ts);
+    (byAcct[e.uid] ||= {})[d] = (byAcct[e.uid][d] || 0) + -e.amount;
+    totals[e.uid] = (totals[e.uid] || 0) + -e.amount;
+  }
+  const top10 = Object.keys(totals).sort((a, b) => totals[b] - totals[a]).slice(0, 10);
+  const series = top10.map((uid) => ({
+    name: names[uid] || shortUid(uid), type: "line", smooth: true,
+    data: dates.map((d) => byAcct[uid][d] || 0),
+  }));
+  creditChart.setOption({
+    tooltip: { trigger: "axis", valueFormatter: (v) => fmtCredits(v) },
+    legend: { data: series.map((s) => s.name) },
+    grid: { left: 50, right: 20, top: 36, bottom: 28 },
+    xAxis: { type: "category", data: dates },
+    yAxis: { type: "value", axisLabel: { formatter: (v) => fmtCredits(v) } },
+    series,
+  }, true);
+  creditChart.resize();
+}
+
+// fmtDay 时间戳 → "09-21"（与 token 图 X 轴口径一致）
+function fmtDay(ts) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// 主面板 tab 切换（账号管理 / 用量与流水）
+function bindMainTabs() {
+  document.querySelectorAll(".main-tabs .mtab").forEach((b) => {
+    b.onclick = () => {
+      document.querySelectorAll(".main-tabs .mtab").forEach((x) => x.classList.toggle("active", x === b));
+      $("mtabAccounts").classList.toggle("hidden", b.dataset.mtab !== "accounts");
+      $("mtabUsage").classList.toggle("hidden", b.dataset.mtab !== "usage");
+      if (b.dataset.mtab === "usage") {
+        loadUsage(); // 切到用量 tab 时拉最新（首次渲染自动刷新）
+        if (usageChart) usageChart.resize();
+        if (creditChart) creditChart.resize();
+      }
+    };
+  });
+}
+
 // 面板 tab / 范围切换事件（bind 末尾调用）
 function bindUsage() {
   $("btnRefreshUsage").onclick = loadUsage;
@@ -1108,8 +1201,11 @@ function bindUsage() {
       $("tabToken").classList.toggle("hidden", b.dataset.tab !== "token");
       $("tabCredit").classList.toggle("hidden", b.dataset.tab !== "credit");
       if (b.dataset.tab === "token" && usageChart) usageChart.resize();
+      if (b.dataset.tab === "credit" && creditChart) creditChart.resize();
     };
   });
-  window.addEventListener("resize", () => { if (usageChart) usageChart.resize(); });
+  $("pgPrev").onclick = () => { if (recentPage > 0) { recentPage--; renderRecentPage(lastNames); } };
+  $("pgNext").onclick = () => { recentPage++; renderRecentPage(lastNames); };
+  window.addEventListener("resize", () => { if (usageChart) usageChart.resize(); if (creditChart) creditChart.resize(); });
 }
 

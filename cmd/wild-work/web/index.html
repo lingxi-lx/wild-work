@@ -35,10 +35,16 @@
     </div>
   </header>
 
-  <!-- 账号管理 -->
+  <!-- 主面板：账号管理 / 用量与流水 双 Tab -->
   <section class="panel">
+    <div class="main-tabs">
+      <button class="mtab active" data-mtab="accounts">账号管理</button>
+      <button class="mtab" data-mtab="usage">用量与流水 <span class="ver" id="usageSince"></span></button>
+    </div>
+
+    <!-- ===== Tab: 账号管理 ===== -->
+    <div class="mtab-body" id="mtabAccounts">
     <div class="panel-head">
-      <h2>账号管理</h2>
       <div class="panel-actions-wrap">
         <!-- 左组：刷新积分/全部签到，整体靠左 -->
         <div class="pa-group pa-left">
@@ -61,21 +67,11 @@
     </div>
     <div id="acctList" class="acct-grid"></div>
     <div id="acctEmpty" class="empty hidden">还没有账号，点击上方按钮添加</div>
-  </section>
-
-  <!-- 模型列表和费率 -->
-  <section class="panel">
-    <div class="panel-head">
-      <h2>模型列表和费率</h2>
-      <button class="btn small" id="btnRefreshFees">刷新</button>
     </div>
-    <div id="feesBox" class="fees"></div>
-  </section>
 
-  <!-- 用量与流水 -->
-  <section class="panel" id="usagePanel">
+    <!-- ===== Tab: 用量与流水 ===== -->
+    <div class="mtab-body hidden" id="mtabUsage">
     <div class="panel-head">
-      <h2>用量与流水 <span class="ver" id="usageSince"></span></h2>
       <div class="pa-group">
         <div class="seg" id="usageRange">
           <button class="seg-btn" data-days="1">今日</button>
@@ -103,13 +99,24 @@
       </table>
     </div>
     <div class="tab-body hidden" id="tabCredit">
-      <table class="table" id="tblAccounts">
-        <thead><tr><th>账号</th><th class="num">入项</th><th class="num">消耗</th><th class="num">过期</th><th class="num">期末余额</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="recent-title">最近流水</div>
+      <div id="creditChart" class="chart-box">图表库加载中…</div>
+      <div class="pager" id="recentPager">
+        <button class="btn small" id="pgPrev">‹ 上一页</button>
+        <span class="pg-info" id="pgInfo">- / -</span>
+        <button class="btn small" id="pgNext">下一页 ›</button>
+      </div>
       <div id="recentList" class="recent"></div>
     </div>
+    </div>
+  </section>
+
+  <!-- 模型列表和费率 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>模型列表和费率</h2>
+      <button class="btn small" id="btnRefreshFees">刷新</button>
+    </div>
+    <div id="feesBox" class="fees"></div>
   </section>
 
   <div class="footer">wild-work — 多渠道账号聚合 · 仅供个人学习 · 右键托盘图标退出</div>
@@ -218,6 +225,15 @@
           <button class="icon-btn" id="btnAddTime" title="增加一个签到时间">＋</button>
         </div>
         <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">-</span></div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide" title="到期日在此范围内的积分视为临期，调度器优先消耗，减少到期作废">临期阈值</label>
+          <select id="selExpiring" class="input" style="width:100px">
+            <option value="1">1 天</option>
+            <option value="2">2 天</option>
+            <option value="3">3 天</option>
+          </select>
+          <span class="hint" style="margin-left:8px">该范围内到期的积分优先消耗</span>
+        </div>
         <div class="row" style="margin-top:8px">
           <label class="lbl wide">开机自启</label>
           <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>
