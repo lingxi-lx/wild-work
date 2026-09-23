@@ -162,6 +162,9 @@ body {
 .icon-op.warn:hover { color: var(--warn); border-color: var(--warn); background: #fffbeb; }
 .icon-op.off { cursor: not-allowed; color: #cbd5e1; opacity: .55; }
 .icon-op.off:hover { color: #cbd5e1; border-color: var(--border); background: var(--card); }
+/* 帮助图标：正常亮度可 hover，不可点击（无 onclick），tooltip 展示说明 */
+.icon-op.help { cursor: help; color: var(--muted); font-weight: 600; }
+.icon-op.help:hover { color: var(--primary); border-color: var(--primary); background: #eff6ff; }
 
 .empty { color: var(--muted); text-align: center; padding: 24px 0; font-size: 14px; }
 .hidden { display: none !important; }

@@ -372,7 +372,6 @@ func (c *Client) FetchModelPricing(_ *auth.Auth) ([]provider.ModelPricing, error
 			Model:    m.ID,
 			Channel:  string(Kind),
 			Rate:     0,
-			Note:     "免费（匿名通道）",
 			Explicit: &yes,
 		})
 	}

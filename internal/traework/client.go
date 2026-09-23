@@ -511,9 +511,14 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 // entPackage 上游权益包条目（UserEntUsage / UserResourceDetail 共用结构）。
 type entPackage struct {
 	EntitlementBaseInfo struct {
-		// AvailableEndpoint 可用端点：0=通用池（本工具走这里），1=官方客户端专用池（本工具用不了）。
+		// AvailableEndpoint 可用端点：0=通用池，1=官方客户端专用池。
+		// 2026-09-23 起上游不再下发 ep=1（专用池也标成 0），该字段仅作历史兜底。
 		AvailableEndpoint int `json:"available_endpoint"`
-		Quota             struct {
+		// ProductID 商品 ID：209=200 档每日签到（官方客户端专用，本工具扣不到），
+		// 208=150 档每日签到（通用）、221=每月登录（通用）。这是当前唯一能区分
+		// 「专用/通用」的稳定判据（2026-09-23 三账号实测：209 的 used 恒为 0）。
+		ProductID int `json:"product_id"`
+		Quota     struct {
 			CreditsLimit float64 `json:"credits_limit"`
 		} `json:"quota"`
 		// EntitlementID 条目唯一标识（如 "340864129538"/"checkin_20260817_..."），ledger 差分对账用。
@@ -531,13 +536,30 @@ type entPackage struct {
 	} `json:"usage"`
 }
 
-// fetchEntUsage 调用上游积分接口，返回全部条目 + 可消耗余额（仅 available_endpoint==0）。
+// unusableProductID 专用池商品 ID 黑名单：200 档每日签到（官方客户端专用）。
+// 历史（2026-09-18）该条目 available_endpoint=1，现上游把专用池也标成 0，
+// 只能靠 product_id 区分——209 恒为「200 签到」，实测本工具对话前后 used 分毫不动。
+const unusableProductID = 209
+
+// usable 判定该包是否属于本工具可消耗的额度池。
+// 判据（2026-09-23 更新）：product_id==209（专用池）或 available_endpoint==1（历史兜底）为不可用；
+// 其余（150 签到/每月登录/用户福利/免费订阅能力）均可消耗。
+func (p entPackage) usable() bool {
+	if p.EntitlementBaseInfo.AvailableEndpoint == 1 {
+		return false
+	}
+	if p.EntitlementBaseInfo.ProductID == unusableProductID {
+		return false
+	}
+	return true
+}
+
+// fetchEntUsage 调用上游积分接口，返回全部条目 + 可消耗余额（仅 usable() 判定为可用的包）。
 // 不可消耗余额由调用方对条目按 Usable 标记汇总（provider.Summarize），本函数不重复算。
 //
-// 可用性判据是 available_endpoint：实测（2026-09-18，三账号对比对话前后用量）
-// 本工具的 llm_utils_chat 只扣 ep=0 的包，ep=1（官方客户端专用池）分毫不动。
-// 早期实现用 group_type!=1 判定，会把 ep=1 的「用户福利」「签到奖励」误计入
-// 可消耗余额，导致 pool 按虚高余额选号。
+// 可用性判据见 entPackage.usable：product_id==209（200 签到专用池）与 ep==1（历史兜底）
+// 不可用。早期实现用 group_type!=1 判定，会把「用户福利」等误计入；后改为
+// available_endpoint==0，2026-09-23 起该字段也失效（专用池被标成 0），再改为 product_id。
 func (c *Client) fetchEntUsage(a *auth.Auth) ([]entPackage, int64, error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
 	if err != nil {
@@ -556,7 +578,7 @@ func (c *Client) fetchEntUsage(a *auth.Auth) ([]entPackage, int64, error) {
 	}
 	var usable int64
 	for _, p := range resp.UserEntitlementPackList {
-		if p.EntitlementBaseInfo.AvailableEndpoint == 0 {
+		if p.usable() {
 			usable += packRemain(p)
 		}
 	}
@@ -608,7 +630,7 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			ExpireAt: unixDate(p.ExpireTime),
 			// entitlement_id 是上游稳定标识，供 ledger 差分对账（过期/消耗归因）
 			Key:    p.EntitlementBaseInfo.EntitlementID,
-			Usable: p.EntitlementBaseInfo.AvailableEndpoint == 0,
+			Usable: p.usable(),
 		})
 	}
 	return usable, items, nil

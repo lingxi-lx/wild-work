@@ -296,8 +296,12 @@ function renderAccounts() {
     // 匿名渠道（无积分/无签到）：只保留「不可操作」的静态指示，
     // 不给刷新积分/停用/删除入口——后端也会硬拒，避免用户白点一次。
     const noCredits = NO_CREDITS.has(a.group);
+    // 问号图标：hover 展示 oczen 通道说明（免费反代范围/私有 Key/代理三项）。
+    // 放在锁头左侧；用独立的 help 样式（正常亮度 + help 光标），不可点击但 tooltip 可用。
+    // title 内换行用 &#10;（HTML 属性实体），字面 \n 会被部分浏览器吞掉导致无 tooltip。
+    const oczenHelp = `<span class="icon-op help" title="关于 OpenCodeZen 通道：&#10;1. 本工具仅反代其免费模型（绕过官方客户端限制）；付费账号可直接使用官方端点，无需经此通道&#10;2. 在 OpenCodeZen 获取的 API-Key 可在设置中配置，避免匿名账号共享限额超限&#10;3. 配置代理后可使用有地域限制的模型，可用性取决于上游通道">?</span>`;
     const ops = noCredits
-      ? `<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
+      ? `${oczenHelp}<span class="icon-op off" title="固定账号，不可停用/删除" onclick="return false">🔒</span>`
       : `${checkinBtn}
           <span class="icon-op" title="刷新积分" onclick="refreshOne('${a.uid}')">↻</span>
           <span class="icon-op warn" title="${disableTitle}" onclick="toggleDisable('${a.uid}',${a.disabled})">${disableIcon}</span>
