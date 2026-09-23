@@ -237,6 +237,18 @@ var traeworkStaticModels = []provider.ModelInfo{
 	{ID: "kimi-k2.6"}, {ID: "kimi-k2.7-code"}, {ID: "minimax-m3"}, {ID: "qwen3-coder"}, {ID: "Doubao-Seed-2.1-Pro"},
 }
 
+// traecode 静态兜底表：TraeCode（solo_agent）与 TraeWork（solo_work_lite）
+// 下发的模型集**不同**，此表按 solo_agent 分组的实际下发清单整理（2026-09 实测）。
+// 与 TraeWork 相比，TraeCode 独有 Doubao-Seed-Code / deepseek-v4.1-flash /
+// glm-5.3-flash / kimi-k2.8-preview / qwen3.8-flash 等新版模型。
+var traecodeStaticModels = []provider.ModelInfo{
+	{ID: "Doubao-Seed-2.1-Pro"}, {ID: "Doubao-Seed-Evolving"}, {ID: "Doubao-Seed-2.1-Turbo"},
+	{ID: "Doubao-Seed-Code"}, {ID: "DeepSeek-V4-Flash-Official"}, {ID: "DeepSeek-V4-Pro-Official"},
+	{ID: "deepseek-v4.1-flash"}, {ID: "glm-5.3-flash"}, {ID: "glm-5.3"}, {ID: "glm-5.2"},
+	{ID: "kimi-k3"}, {ID: "kimi-k2.8-preview"}, {ID: "minimax-m3"}, {ID: "qwen3.8-flash"},
+	{ID: "qwen3.8-max"}, {ID: "qwen-3.7-plus"},
+}
+
 // dynamicModelsCache 保留给旧测试/旧单平台语义；实际多平台缓存放在 Runtime 内。
 var dynamicModelsCache struct {
 	sync.RWMutex
@@ -629,6 +641,9 @@ func WorkBuddyStaticModels() []provider.ModelInfo {
 }
 func TraeWorkStaticModels() []provider.ModelInfo {
 	return append([]provider.ModelInfo{}, traeworkStaticModels...)
+}
+func TraeCodeStaticModels() []provider.ModelInfo {
+	return append([]provider.ModelInfo{}, traecodeStaticModels...)
 }
 
 // WorkBuddyAIStaticModels 国际版静态模型表实际定义在 internal/workbuddyai 包，

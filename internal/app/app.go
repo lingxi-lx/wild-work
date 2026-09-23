@@ -1764,7 +1764,7 @@ func (a *App) FeesInfo() map[string]any {
 	}
 
 	channels := buildFeesChannels(modelsByKind, cached, []provider.Kind{
-		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork,
+		provider.WorkBuddy, provider.WorkBuddyAI, provider.TraeWork, provider.TraeCode, provider.Qoder, provider.QoderCN, provider.QoderCOM, provider.QwenWork,
 	})
 
 	result := map[string]any{

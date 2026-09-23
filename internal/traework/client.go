@@ -47,18 +47,52 @@ func Classify(status int, body string) provider.ErrKind {
 
 // Client Trae SOLO 上游 HTTP 客户端。
 type Client struct {
-	HTTP              *http.Client
-	StreamHTTP        *http.Client
-	AgentHost         string
-	UgHost            string
-	OAuthHost         string
+	HTTP       *http.Client
+	StreamHTTP *http.Client
+	AgentHost  string
+	UgHost     string
+	OAuthHost  string
+	// PricingHost 定价接口基址；空则回落到 WorkHost。
+	// 单列为字段是为了让测试可指向本地 mock。
+	PricingHost       string
 	ClientID          string
 	CheckinRetryDelay time.Duration // 9074 限流后的重试等待；生产默认 8s
+
+	// Function 对话/模型列表接口的 function 值（solo_work_lite / solo_agent）。
+	Function string
+	// PricingFunctions 定价接口 functions 查询参数（各渠道口径不同）。
+	PricingFunctions string
+	// PricingChannel 定价条目落库的渠道标签（traework / traecode）。
+	PricingChannel string
+	// PricingPrimary 渠道主 function，去重时优先（即对话真实扣费的那一组）。
+	PricingPrimary string
 }
 
 func New() *Client {
 	tr := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 20, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 120 * time.Second}
-	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second}
+	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, PricingHost: WorkHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second, Function: Function, PricingFunctions: PricingFunctionsWork, PricingChannel: "traework", PricingPrimary: PricingPrimaryWork}
+}
+
+// NewTraeCode 返回 TraeCode（代码版）专用 Client：function=solo_agent。
+//
+// TraeCode 与 TraeWork 是**同一上游的不同 function**，账号体系相同，
+// 因此二者共用一份凭证（调用方应共享同一个 pool，避免 refresh token 轮换冲突）；
+// 差异只在 function 与定价分组口径。
+func NewTraeCode() *Client {
+	c := New()
+	c.Function = FunctionCode
+	c.PricingFunctions = PricingFunctionsCode
+	c.PricingChannel = "traecode"
+	c.PricingPrimary = PricingPrimaryCode
+	return c
+}
+
+// pricingBase 定价接口基址（未显式设置时回落到 WorkHost）。
+func (c *Client) pricingBase() string {
+	if c.PricingHost != "" {
+		return c.PricingHost
+	}
+	return WorkHost
 }
 
 func (c *Client) agentBase() string { return c.AgentHost }
@@ -150,7 +184,7 @@ func normalizeExpiresAt(v int64) int64 {
 }
 
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body)))
+	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body, c.Function)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -178,7 +212,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	// traework 上游 llm_utils_chat 强制 stream=true（见 PrepareBody），
 	// 所有模型均为流式模式；非流式请求由本地 Aggregate() 缓冲 SSE 后聚合。
 	// mode_type=nil 返回全部配置，按 config_name 去重避免流式/非流式重复。
-	body := map[string]any{"function": Function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
+	body := map[string]any{"function": c.Function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModels, bytes.NewReader(raw))
 	if err != nil {
@@ -227,7 +261,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 // FetchModelPricing 从 /api/remote/v1/models 拉取模型积分倍率。
 // 按 config_name 去重，解析 features.consumption_rate.rate。
 func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
-	url := WorkHost + EpModelsPricing + "?functions=solo_agent_remote,solo_work_remote,solo_design_remote&show_custom_model=true"
+	url := c.pricingBase() + EpModelsPricing + "?functions=" + c.PricingFunctions + "&show_custom_model=true"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -267,25 +301,29 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	if env.Code != 0 {
 		return nil, fmt.Errorf("trae pricing api code=%d", env.Code)
 	}
-	// 按 name 去重：同一模型可能出现在多个 function 下，倍率一致
-	seen := map[string]bool{}
-	out := make([]provider.ModelPricing, 0)
+	// 去重：同一模型可能出现在多个 function 分组下，且**倍率未必一致**
+	// （实测豆包 Seed-2.1-Pro：solo_agent=0.08 / _remote=0.8）。
+	// 对话按主 function 计费，故主 function 的结果优先，非主 function 仅作兜底。
+	byName := make(map[string]provider.ModelPricing)
 	for _, fn := range env.Data.List {
+		isPrimary := c.PricingPrimary != "" && fn.Function == c.PricingPrimary
 		for _, m := range fn.Models {
-			if seen[m.Name] {
-				continue
-			}
-			seen[m.Name] = true
 			rate := parseTraeFeatures(m.Features)
 			if rate <= 0 {
 				continue
 			}
-			out = append(out, provider.ModelPricing{
-				Model:   m.Name,
-				Channel: "traework",
-				Rate:    rate,
-			})
+			if _, seen := byName[m.Name]; !seen || isPrimary {
+				byName[m.Name] = provider.ModelPricing{
+					Model:   m.Name,
+					Channel: c.PricingChannel,
+					Rate:    rate,
+				}
+			}
 		}
+	}
+	out := make([]provider.ModelPricing, 0, len(byName))
+	for _, p := range byName {
+		out = append(out, p)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("trae pricing api returned empty")
