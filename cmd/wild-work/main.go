@@ -340,8 +340,12 @@ func main() {
 	// 面板保存 oczen key 后热更新渠道凭证；启动时也应用一次配置中的初始 key
 	appInst.SetOczenSyncer(ocUp.SetAPIKey)
 	ocUp.SetAPIKey(cfg.OczenAPIKey)
+	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
+	compat.SetSystemOneHandler(func(w http.ResponseWriter, r *http.Request, state string, questions map[string]any) (int, []byte, error) {
+		return ocUp.SystemOne(state, questions)
+	})
 	mux := http.NewServeMux()
-	compat.Routes(mux) // POST /v1/responses · /v1/messages · /v1/messages/count_tokens
+	compat.Routes(mux) // POST /v1/responses · /v1/messages · /v1/messages/count_tokens · /v1/systemone
 	mux.Handle("/", inner)
 	if compat != nil {
 		log.Printf("三接口兼容层已启用：default_channel=%q max_tokens_cap=%d model_map=%d 条",
@@ -349,7 +353,6 @@ func main() {
 	}
 	appInst.SetHandler(inner)
 	appInst.SetRootHandler(mux)
-	compat.SetAPIKeySource(inner.CurrentAPIKey) // 面板改 API-Key 后，兼容层立即跟随
 
 	if err := appInst.StartServer(); err != nil {
 		log.Printf("listen %s failed: %v（面板中将提示）", cfg.Listen.Addr(), err)

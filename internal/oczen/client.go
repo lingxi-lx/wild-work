@@ -416,6 +416,33 @@ func (c *Client) Classify(status int, body string) provider.ErrKind {
 	}
 }
 
+// SystemOne 调用 jev 决策模型端点（POST /v1/systemone）。
+// 透传 state+questions，自动注入 model、规范 criteria 并附加伪装头。
+// 返回上游原始 JSON 响应体（非流式）；status>=400 时 body 为错误详情。
+func (c *Client) SystemOne(state string, questions map[string]any) (int, []byte, error) {
+	body := map[string]any{
+		"model":     "jev-1.13-free",
+		"state":     state,
+		"questions": questions,
+	}
+	out, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("oczen systemone marshal: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, c.base()+"/systemone", bytes.NewReader(out))
+	if err != nil {
+		return 0, nil, err
+	}
+	c.headered(req, canonicalSessionID(randomID("sysone", 8)))
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, raw, nil
+}
+
 // Stream 透传上游 SSE，并把 model 字段回填成客户端请求的原始模型名（R14）。
 // 返回值为末帧捕获的 usage（供记账，上游未返回时为 nil）。
 func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {

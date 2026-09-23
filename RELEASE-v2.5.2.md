@@ -53,6 +53,25 @@ Trae **代码版**：与 TraeWork 是**同一上游的两个 function**（`solo_
 > - **稳定性**：该通道属于上游的非公开承诺接口，上游随时可能调整校验规则或增删免费模型；
 >   如遇到大量 403 错误，请关注后续版本更新。
 
+#### Jev 结构化决策端点（`POST /v1/systemone`）
+
+OpenCode Zen 上还有一个免费的结构化决策模型 **Jev（`jev-1.13-free`）**，它不是聊天模型——
+不能调 `/v1/chat/completions`（会 500），只能通过专用端点 `/v1/systemone` 调用。
+本版网关已新增该端点的透明代理，用法：
+
+```bash
+curl -X POST "http://127.0.0.1:7863/v1/systemone" \
+  -H "Authorization: Bearer WildWorkAPI" \
+  -H "Content-Type: application/json" \
+  -d '{"state":"...","questions":{"name":{"type":"noul|choice|score","criteria":...}}}'
+```
+
+- 网关负责鉴权 + body 解析 + model 注入 + 伪装头，客户端只需传 `state` + `questions`（含 `criteria`）
+- 三种问题类型：**noul**（是/否概率 0~1）、**choice**（多选一 + 概率分布）、**score**（0~N-1 等级分）
+- 实测 0.5~1.3s 完成一次决策，`cost:"0"` 免费
+- 网关校验 `state`/`questions` 必填，缺则回 400；无 API Key 回 401
+- 详见 README §5 Jev 结构化决策端点
+
 ### 单渠道上游代理
 
 `config.json` 新增 `proxies` 段，**按渠道单独配置代理**（未配置 = 直连）：

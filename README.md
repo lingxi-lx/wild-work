@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **三接口协议兼容**：`/v1/chat/completions`（OpenAI Chat）+ `/v1/responses`（OpenAI Responses）+ `/v1/messages`（Anthropic Messages，含 `count_tokens`），可直接接入 `codex` CLI 与 `claude` CLI
+- **三接口协议兼容**：`/v1/chat/completions`（OpenAI Chat）+ `/v1/responses`（OpenAI Responses）+ `/v1/messages`（Anthropic Messages，含 `count_tokens`）+ **`/v1/systemone`（Jev 结构化决策）**，可直接接入 `codex` CLI、`claude` CLI 与需要语义决策的自动化流程
 - **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句，防止上游 11128 内容拦截
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
 - **错误分类精细化**：区分「请求问题」与「账号问题」——内容拦截/上下文超限不罚号，限流/风控/账号故障分级冷却，429 不再误判余额耗尽
@@ -263,6 +263,60 @@ export ANTHROPIC_MODEL="traework/glm-5.2"
 > 另外 WorkBuddy 国内版/国际版上游对某些 agent 系统提示词（如 Codex CLI 自带的那份）
 > 会触发内容策略拦截（上游返回 `code=11128 Illegal API invocation from an unapproved channel`），
 > 实测 `traework/*`、`qoder/*`、部分 `workbuddy/*` 模型不受影响；如遇拦截请更换渠道模型。
+
+### 5. Jev 结构化决策端点（`/v1/systemone`）
+
+OpenCode Zen 上还有一个免费的结构化决策模型 **Jev（`jev-1.13-free`）**。
+它不是聊天模型——不能调 `/v1/chat/completions`（会 500），只能通过专用端点调用。
+本网关在 `POST /v1/systemone` 直接透传，用法：
+
+```bash
+curl -X POST "http://127.0.0.1:7863/v1/systemone" \
+  -H "Authorization: Bearer WildWorkAPI" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "用户反馈：我被重复扣费了，订单号 A-104，要求今天退款。",
+    "questions": {
+      "refund":  {"type": "noul",   "criteria": {"true": "要求退款", "false": "未提及退款"}},
+      "team":    {"type": "choice", "criteria": {"billing": "支付/发票/退款", "technical": "Bug/故障", "other": "以上都不是"}},
+      "urgency": {"type": "score",  "criteria": ["低（不紧急）", "中（今天内）", "高（立即处理）"]}
+    }
+  }'
+```
+
+#### 三种问题类型
+
+| 类型 | 问什么 | 返回 | 类比代码 |
+|------|--------|------|----------|
+| **noul** | 这是不是 X？ | 0~1 的概率 | `if (isX(state))` |
+| **choice** | 这是哪个？ | 每个选项的概率 + 最佳选择 | `switch (classify(state))` |
+| **score** | 这几分？ | 0~(N-1) 等级分 + 概率分布 | `scoring(state)` |
+
+#### 响应示例
+
+```json
+{
+  "model": "jev-1.13-free",
+  "answers": {
+    "refund":  {"type": "noul",   "noul": 0.92},
+    "team":    {"type": "choice", "choice": "billing", "confidence": 1, "probabilities": {"billing":1,"technical":0,"other":0}},
+    "urgency": {"type": "score",  "score": 1.83, "confidence": 0.74,
+                "legend": {"0":"低","1":"中","2":"高"}, "probabilities": {"0":0,"1":0.17,"2":0.83}}
+  },
+  "usage": {"input_tokens": 444, "output_tokens": 69},
+  "cost": "0"
+}
+```
+
+#### 关键限制
+
+- **必须带 `criteria` 字段**——`noul` 用 dict `{"true":"…","false":"…"}`，`choice` 用 dict（每个选项的判断标准），`score` 用 list（与级别对齐的描述）
+- `state` 文本约 32k token 预算（state + questions 共享），英文最强，数学/日期/十六进制请交给代码
+- `choice` 最多 255 个选项，`score` 2~10 级
+- **免费**：`cost:"0"`，实测 0.5~1.3s 完成决策
+- 也可直连上游：`POST https://opencode.ai/zen/v1/systemone` + `Authorization: Bearer public` + OpenCode 伪装头，但本网关已帮你处理了鉴权与伪装
+
+> **别拿它当 GPT 用**——把它当成"语义判断 API"：给它状态和选择题，它回概率和置信度，你的代码根据 typed 值做后续决策。
 
 ## 面板操作指南
 
