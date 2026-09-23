@@ -35,7 +35,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R7 | **移除 wails / WebView2 全部依赖** | 省内存与运行时；平台能力封装进 `internal/platform`（build tag 拆分） |
 | R8 | daemon 单进程：一个 `http.Server` 同时服务 OpenAI 端点 + 管理 API + 静态 UI | 沿用 server 现有 ServeMux 扩展 |
 | R9 | 核心业务（pool/scheduler/upstream/traework/server/login/config/auth/provider）**整体复用**，格式零迁移 | config.json / auths/ / data/state.json 兼容旧版；旧 state.json 自动迁移到 state-workbuddy.json |
-| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + OpenCodeZen(oczen 匿名) 七渠道；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
+| R10 | 新增渠道扩展方式：实现 `provider.Upstream` 接口 + auth 加载器 + 注册 Runtime | 模型前缀 `channel/<model>` 路由；已实现 WorkBuddyCN(国内) + WorkBuddyAI(国际) + TraeWork + TraeCode(与 TraeWork 共账号，function=solo_agent) + QoderCN + QoderCOM(国际) + 千问办公(qwenwork) + OpenCodeZen(oczen 匿名) 八渠道；旧 Qoder（`qoder/*`，QoderWork）已从界面下线但路由保留 |
 | R11 | Windows 产物在 WSL 交叉编译（`GOOS=windows CGO_ENABLED=0`，已验证可行）；macOS 产物走 GitHub Actions macos-latest（cgo 必需） | WSL 无法编 darwin cgo；CI 增加 darwin job |
 | R12 | **无桌面 Linux 使用 `--no-tray` 参数** | 无参启动在无 DBus 环境托盘 panic 直接 exit 并提示；`--no-tray` 跳过托盘打印信息阻塞等待 Ctrl+C |
 | R13 | **三接口兼容采用两层结构：内层 handler 不动，新增 `internal/gateway` 边缘层**，经 **in-process 调用**（`io.Pipe` + ResponseWriter 形状）复用内层 | 代码量比内联重构多 20%，但改动面小一个数量级（主链路仅 2 处调用点 + 1 个访问器），回归风险低、可脱离 pool 单测。**不得用 HTTP 自环**（`0.0.0.0` 监听不可作目标、鉴权双份、启动竞态） |
@@ -44,6 +44,7 @@ Wild-Work 是 WorkBuddy（国内版+国际版）/TraeWork/Qoder 多渠道账号�
 | R16 | **无账号渠道（oczen）不建 auth 文件、不进 `reloadAccounts`、不参与禁用/冷却惩罚** | 匿名凭证是常量 `public`；`SyncToDir` 会剔除磁盘上不存在的虚拟账号，故只在装配时注入一次。单账号 + 不可重登 ⇒ 任何账号级冷却都等于整渠道下线，故 4xx 一律走新增的 `ErrPassthrough`（原文透传、不计错不冷却），只有 429 才短冷却。详见 `docs/opencodezen渠道接入备忘.md` |
 | R17 | **用量/积分双流水分口径统计，不强关联、不折算** | `internal/ledger` 双 JSONL（usage 按渠道×模型 / credit 按账号 earn·spend·expire）；写入仅 append 缓冲句柄（30s AutoFlush），读取仅在 UI 请求 `/api/usage` 时按月分段扫描聚合，常驻内存 ≈0。`Upstream.Stream` 返回末帧 usage（R14 同款显式传参哲学）。首见账号只记一条「存量额度」baseline，不逐条展开。详见 `docs/用量积分流水记账备忘.md` |
 | R18 | **临期阈值可配（默认 24h，下限 24h）** | `config.schedule.expiring_threshold_hours`，normalize 钳下限（日期粒度到期判定低于一天无意义）；scheduler 与 app.creditTotals 同源取 `cfg.ExpiringThresholdDur` |
+| R19 | **TraeWork 专用池判据是 `product_id==209`** | 2026-09-23 起上游不再下发 `available_endpoint=1`（专用池也标 0），ep 判据整体失效；实测三账号 `product_id=209`（200 档每日签到）used 恒为 0，判定改为 `ep==1 \|\| pid==209`（ep 保留为历史兑底）。pid=208（150 签到）/221（每月登录）均可消耗 |
 
 ## 2. 架构选型（依据）
 
@@ -151,12 +152,14 @@ POST /api/quit                     # 退出程序
 15. **错误分类 429 必须优先于 hardMarkers**：限流 body 高频带 `quota exceeded`，先判 hardRule 会把限流误归余额耗尽 → 12h 硬冷却。三渠道 `Classify` 均已修复此顺序。
 16. **脱敏层仅做文本替换不做语义变更**：`internal/sanitize` 只改模板句、不改用户内容语义；预检不命中时零分配原样通过。将来配置 `features.sanitize_fingerprints` 可一键关闭（逃生门）。
 17. **积分「可用/不可用」拆分统计**：`provider.ResourceItem.Usable` 标记条目是否属于本工具可消耗的额度池，`provider.Summarize()` 汇总小计。
-    - TraeWork 判据是 **`available_endpoint == 0`**（ep=1 是官方客户端专用池，本工具扣不到）；
-      **不得用 `group_type` 判定**——同名「每日签到」「用户福利」会同时存在 ep=0 与 ep=1 两份。
-      实测证据见 `docs/upstream-reverse-engineering.md` §2.3。
-    - `UserResource` / `UserResourceDetail` 返回的 remain **只能是可消耗余额**（ep=0），
+    - TraeWork 判据（2026-09-23 更新，R19）是 **`available_endpoint==1 \|\| product_id==209` 为不可用**：
+      上游已不再下发 ep=1（专用池也标 0），ep 判据仅作历史兑底；实测三账号 `product_id=209`
+      （200 档每日签到）used 恒为 0。**不得用 `group_type` 判定**——同名「每日签到」既有
+      通用份也有专用份。早期仅用 ep 判定的实砰证据见 `docs/upstream-reverse-engineering.md` §2.3。
+    - `UserResource` / `UserResourceDetail` 返回的 remain **只能是可消耗余额**，
       否则 pool 会按虚高余额选号。含专用池的总量（`usage_summary.total_amount`）不能作路由依据。
-    - 不可消耗额度仅用于面板展示（`pool.Status.UnusableCredits`），不参与 `Pick()` 排序。
+    - 不可消耗额度仅用于面板展示（`pool.Status.UnusableCredits`），不参与 `Pick()` 排序；
+      展示的唯一目的是让用户看到的总积分能和官网对上。
 18. **到期时间字段因渠道而异，缺失则不显示**：WorkBuddy 系是 `CycleEndTime`（**上游从不下发 `PackageEndTime`**，旧判据恒 miss），
     TraeWork 是 `expire_time`（Unix 秒），Qoder 无此字段。均按 **UTC+8 墙钟**解析（`softRateResetLoc`），
     用 `time.Local` 会在非 UTC+8 机器上算错一天。上游未下发时 `ResourceItem.ExpireAt` 必须为空串，

@@ -10,11 +10,12 @@
 - **请求体指纹脱敏**：自动清除 Claude Code / Codex CLI 注入的模板句，防止上游 11128 内容拦截
 - **OpenAI 兼容代理**：`/v1/chat/completions`、`/v1/models`，支持流式/非流式，模型前缀路由
 - **错误分类精细化**：区分「请求问题」与「账号问题」——内容拦截/上下文超限不罚号，限流/风控/账号故障分级冷却，429 不再误判余额耗尽
-- **七渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + QoderCN + QoderCOM（国际版） + 千问办公 + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
+- **八渠道聚合**：WorkBuddyCN(CodeBuddy) + WorkBuddyAI（国际版） + TraeWork + TraeCode + QoderCN + QoderCOM（国际版） + 千问办公 + OpenCodeZen（`oczen/*`，匿名免费、无需账号），模型前缀路由，粘性路由优先复用账号以提升会话缓存利用率，临期积分优先消耗；旧 Qoder（`qoder/*`）路由保留但已从界面下线
 - **匿名免费通道**（OpenCodeZen）：内置 `public` 凭证即可调用 Zen 上的免费模型（含 `big-pickle`），无需注册/登录；面板固定一个 `[OpenCodeZen] 匿名` 条目（不可增删停用、无签到、积分显示「不适用」）
 - **自动签到**：每日定时签到领额度，token 保活，冷却状态机
 - **自动领日活奖励**（WorkBuddy 国际版）：定时自动用免费模型对话保活，自动领取每日活跃奖励，无需手动签到
-- **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、模型列表和费率、API 配置
+- **用量与流水统计**：token 流水（渠道×模型）与积分流水（入项/消耗/过期）双口径记账，面板折线图 + 模型用量榜 + 积分流水对账，临期阈值可配
+- **Web 管理面板**：账号管理（添加/签到/刷新/停用/删除）、积分明细、模型列表和费率、API 配置、统一设置弹层（含单渠道代理）
 - **系统托盘**：常驻右下角，双击打开面板，右键菜单操作
 - **跨平台**：Windows（完整支持）、macOS（代码已就绪，CI 构建）、Linux（无头模式）
 - **developer→system 角色转换**：自动将下游 Agent 发送的 `<developer>` 角色改写为 `<system>`，避免上游触发内容过滤
@@ -47,6 +48,9 @@
 | [zhangdailin/Orchids-2api](https://github.com/zhangdailin/Orchids-2api) | Qoder 渠道端点与逻辑比对参考 |
 | [287775856/workbuddy2api-gui](https://github.com/287775856/workbuddy2api-gui) | 同类项目账号池状态可视化面板参考 |
 | [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) | 同类项目账号管理工具参考 |
+
+同时感谢本项目的代码贡献者：[@bibibiu-84](https://github.com/bibibiu-84)（TraeCode 渠道，PR #33）、
+[@youki258](https://github.com/youki258)（Qoder 上下文档位透传，PR #34）。
 
 > 若上述项目作者认为本项目的引用方式不当，请提 issue 联系，我们会立即调整或移除相关内容。
 
@@ -181,7 +185,7 @@ Base URL: http://127.0.0.1:7863/v1
 API Key:  WildWorkAPI
 ```
 
-模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
+模型 ID 需带渠道前缀：`workbuddy/<model>`、`workbuddyai/<model>`、`traework/<model>`、`traecode/<model>`、`qodercn/<model>`、`qodercom/<model>`、`qwenwork/<model>`、`oczen/<model>`（旧 `qoder/<model>` 仍可用，已从界面下线）。
 
 #### OpenCodeZen 匿名免费模型（`oczen/*`）
 

@@ -24,7 +24,7 @@ internal/
 ├── scheduler/scheduler.go     # 定时签到 + token 保活 + 冷却解冻
 ├── provider/provider.go       # Upstream 接口 + 共享类型（ModelInfo/ModelPricing/ResourceItem）
 ├── upstream/                   # WorkBuddy(CodeBuddy) 上游：chat/billing/auth/模型/定价/脱敏
-├── traework/                   # TraeWork 上游：chat(SOLO)/billing/checkin/模型/定价
+├── traework/                   # TraeWork/TraeCode 上游：chat(SOLO)/billing/checkin/模型/定价（TraeCode=NewTraeCode()，同上游不同 function）
 ├── qoder/                      # 旧 Qoder(QoderWork) 上游：已下线，路由保留
 ├── qodercn/                    # QoderCN 上游：qoder2api 参数形态（cosyVersion 1.0.10 / 双路径签到）
 ├── qodercom/                   # QoderCOM 国际版上游：三域分离（openapi/api1/api2.qoder.sh）
@@ -88,7 +88,14 @@ Global: chatBase=`www.workbuddy.ai`, billingBase=`www.workbuddy.ai`
 
 Agent: `trae-api-cn.mchost.guru`, UG: `api.trae.cn`, OAuth: `api.trae.com.cn`
 
-模型定价：`GET work.trae.cn/api/remote/v1/models`，`features.consumption_rate.rate`（JSON 字符串需二次解析），discount 优先。
+**TraeCode（`traecode/*`）**：同一上游的 `function=solo_agent`（TraeWork 是 `solo_work_lite`），
+账号体系与签到调度完全共享（`traework.NewTraeCode()`），仅模型集与定价分组不同。
+
+模型定价：`GET work.trae.cn/api/remote/v1/models`，`features.consumption_rate.rate`（JSON 字符串需二次解析），discount 优先；
+TraeWork/TraeCode 分组去重按主 function 优先（同一模型在 `solo_agent` 与 `_remote` 下倍率可能不同）。
+
+**积分可用性判据（R19，2026-09-23 更新）**：`ep==1 || product_id==209` 不可用。
+上游已不再下发 ep=1，200 档每日签到（pid=209）仅靠 product_id 识别；208（150 签到）/221（每月登录）均可消耗。
 
 ### Qoder 系（qodercn / qodercom）
 
